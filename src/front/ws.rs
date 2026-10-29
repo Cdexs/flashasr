@@ -320,8 +320,8 @@ pub async fn serve_conn(
         let mut tls = acceptor.accept(tcp).await.ok()?;
         // FLASH-P2-04：先读请求头；`GET /v1/status` 就地回答，其余字节倒回给 WebSocket 握手。
         let head = status::read_head(&mut tls).await.ok()?;
-        if let Some(key) = status::status_request(&head) {
-            answer_status(&shared, ip, key, &mut tls).await;
+        if let Some((api, key)) = status::api_request(&head) {
+            answer_api(&shared, ip, api, key, &mut tls).await;
             return None;
         }
         let tls = status::Rewind::new(head, tls);
@@ -405,33 +405,53 @@ struct Conn {
 type Ws =
     tokio_tungstenite::WebSocketStream<status::Rewind<tokio_rustls::server::TlsStream<TcpStream>>>;
 
-/// FLASH-P2-04：回 `/v1/status`。要带有效终端 key（与识别同一把，失败计入锁定）；暂停中照常回（带 `paused`）。
-async fn answer_status(
+/// FLASH-P2-04 / 05：回普通 HTTP 接口。都要带有效终端 key（与识别同一把，失败计入锁定）。
+/// - `/v1/status`：暂停中照常回（带 `paused`）；
+/// - `/v1/profile/voiceprint/reset`：只重置**调用方自己**的声纹（终端由 key 确定，不收别的参数）。
+async fn answer_api(
     shared: &Shared,
     ip: IpAddr,
+    api: status::Api,
     key: Option<String>,
     tls: &mut tokio_rustls::server::TlsStream<TcpStream>,
 ) {
     use tokio::io::AsyncWriteExt;
-    let ok = key.is_some_and(|k| {
+    let terminal = key.and_then(|k| {
         let _g = lock(&shared.store);
         TerminalStore::load()
             .check_key(&k, now_ts())
-            .and_then(|t| local_from_loopback(t.local, ip))
-            .is_ok()
+            .and_then(|t| local_from_loopback(t.local, ip).map(|_| t.id.clone()))
+            .ok()
     });
-    let resp = if ok {
-        let st = shared.core.engine_status();
-        status::http_response(
-            200,
-            "OK",
-            &status::status_body(
-                shared.core.engine_up(),
-                st.local_realtime,
-                st.llm,
-                shared.paused(),
-            ),
-        )
+    let resp = if let Some(terminal_id) = terminal {
+        match api {
+            status::Api::Status => {
+                let st = shared.core.engine_status();
+                status::http_response(
+                    200,
+                    "OK",
+                    &status::status_body(
+                        shared.core.engine_up(),
+                        st.local_realtime,
+                        st.llm,
+                        shared.paused(),
+                    ),
+                )
+            }
+            status::Api::VoiceprintReset => {
+                // 引擎在线 ⇒ 交给引擎（它要丢内存那份再删档）；不在线 ⇒ 直接删档（引擎重启后从文件读，自然为空）。
+                if shared.core.engine_up() {
+                    shared.core.send(Frame::new(
+                        Kind::ResetVoiceprint,
+                        0,
+                        terminal_id.as_bytes().to_vec(),
+                    ));
+                } else if let Err(e) = crate::asr_shared::purge_terminal_voiceprint(&terminal_id) {
+                    log::warn!("[flashasr] 删除终端 {terminal_id} 声纹失败：{e}");
+                }
+                status::http_response(200, "OK", &json!({ "reset": true }))
+            }
+        }
     } else {
         shared.fail(ip);
         status::http_response(
@@ -675,6 +695,11 @@ impl Conn {
             optimize: p["feiyin"]["output_optimization_enabled"]
                 .as_bool()
                 .unwrap_or(false),
+            // FLASH-P2-05：场景（给输出优化）；不是对象 / 解析失败 ⇒ 场景未知。
+            scene: p["feiyin"]["scene"]
+                .is_object()
+                .then(|| serde_json::from_value(p["feiyin"]["scene"].clone()).ok())
+                .flatten(),
         };
         let (session, rx) = self.shared.core.open(&params);
         self.task = Some(Task {
@@ -761,7 +786,11 @@ impl Conn {
                     event(
                         &task_id,
                         "task-finished",
-                        json!({ "output": {}, "usage": { "duration": end.audio_secs.ceil() as u64 } }),
+                        // FLASH-P2-05：`speech_ms` = 有效语音毫秒（终端记使用统计）。
+                        json!({ "output": {}, "usage": {
+                            "duration": end.audio_secs.ceil() as u64,
+                            "speech_ms": end.speech_ms,
+                        } }),
                     )
                 } else {
                     failed(&task_id, end_code(&end.error), &end.error)
@@ -804,6 +833,16 @@ fn result_json(r: &ResultPayload) -> Value {
         },
         "usage": null,
     });
+    // FLASH-P2-05：终稿附带（空 ⇒ 不出现该键）。
+    if !r.wordbook_hits.is_empty() {
+        v["output"]["feiyin"]["wordbook_hits"] = json!(r.wordbook_hits);
+    }
+    if !r.learn_suggestions.is_empty() {
+        v["output"]["feiyin"]["learn_suggestions"] = json!(r.learn_suggestions);
+    }
+    if !r.optimization_skipped.is_empty() {
+        v["output"]["feiyin"]["optimization_skipped"] = json!(r.optimization_skipped);
+    }
     // S10：终稿译文（阿里 Gummy 同形 `output.translations[]`）；没有译文 ⇒ 不出现该键。
     if let Some(t) = &r.translation {
         v["output"]["translations"] = json!([{
@@ -887,6 +926,7 @@ mod tests {
                 word(300, 520, "好", "，", "rough"),
                 word(600, 900, "hello", "", "estimated"),
             ],
+            ..Default::default()
         };
         let v = result_json(&r);
         let s = &v["output"]["sentence"];
@@ -930,6 +970,7 @@ mod tests {
             text: "你好".into(),
             tentative: 2,
             words: Vec::new(),
+            ..Default::default()
         };
         let v = result_json(&r);
         let s = &v["output"]["sentence"];
@@ -955,6 +996,7 @@ mod tests {
             text: "你好，世界。".into(),
             tentative: 0,
             words: Vec::new(),
+            ..Default::default()
         };
         let v = result_json(&r);
         let ts = v["output"]["translations"]
@@ -978,6 +1020,7 @@ mod tests {
             text: "你好".into(),
             tentative: 0,
             words: Vec::new(),
+            ..Default::default()
         };
         let v = result_json(&r);
         assert!(v["output"].get("translations").is_none(), "{v}");
@@ -1056,6 +1099,7 @@ mod tests {
             text: "你好".into(),
             tentative: 2,
             words: Vec::new(),
+            ..Default::default()
         };
         let v = result_json(&r);
         assert!(
@@ -1072,6 +1116,7 @@ mod tests {
             text: String::new(),
             tentative: 0,
             words: Vec::new(),
+            ..Default::default()
         };
         let v2 = result_json(&r2);
         assert_eq!(v2["output"]["sentence"]["begin_time"], 0, "{v2}");
@@ -1125,5 +1170,32 @@ mod tests {
             body.contains("purge_terminal_voiceprint(terminal_id)"),
             "{body}"
         );
+    }
+
+    /// FLASH-P2-05：终稿附带字段进 `output.feiyin`；空 ⇒ 不出现该键。
+    #[test]
+    fn final_extras_in_result_json() {
+        let r = ResultPayload {
+            is_final: true,
+            text: "飞音".into(),
+            wordbook_hits: vec!["飞音".into()],
+            learn_suggestions: vec!["八方思见说".into()],
+            optimization_skipped: "llm_not_configured".into(),
+            ..Default::default()
+        };
+        let v = result_json(&r);
+        assert_eq!(v["output"]["feiyin"]["wordbook_hits"], json!(["飞音"]));
+        assert_eq!(
+            v["output"]["feiyin"]["learn_suggestions"],
+            json!(["八方思见说"])
+        );
+        assert_eq!(
+            v["output"]["feiyin"]["optimization_skipped"],
+            "llm_not_configured"
+        );
+        let v = result_json(&ResultPayload::default());
+        for k in ["wordbook_hits", "learn_suggestions", "optimization_skipped"] {
+            assert!(v["output"]["feiyin"].get(k).is_none(), "{k}");
+        }
     }
 }

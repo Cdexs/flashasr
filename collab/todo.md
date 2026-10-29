@@ -27,7 +27,7 @@
 | FLASH-P2-02 | 删在线 FunASR：`AsrModel` 只剩本地实时（不做中转，Gavin 10-29：「我们自己后端的 FlashASR 就不保留直连 FunASR 的能力了，不做这个中转了，只做我们本地实时语音识别服务。」）；`run-task` `model` 忽略 | ✅ |
 | ~~FLASH-P2-03~~ | ~~在线 FunASR 转发~~ —— **取消**（同上） | — |
 | FLASH-P2-04 | `GET /v1/status`：协议版本、已开引擎、本地实时是否加载完、剩余路数、是否配了大模型 | ✅ 剩余路数未做（引擎侧无此查询，留作后续） |
-| FLASH-P2-05 | 协议扩展：`feiyin.scene`（场景给输出优化）、`usage.speech_ms`、终稿 `wordbook_hits` / `learn_suggestions`、未配大模型时的提示字段、`POST /v1/profile/voiceprint/reset` | ⬜ |
+| FLASH-P2-05 | 协议扩展：`feiyin.scene`（场景给输出优化）、`usage.speech_ms`、终稿 `wordbook_hits` / `learn_suggestions`、未配大模型时的提示字段、`POST /v1/profile/voiceprint/reset` | ✅ 冒烟：词表命中、speech_ms、未配大模型提示、声纹重置（401 无 key）全过 |
 | FLASH-P2-06 | 本机自动配对：首次运行自动建「本机」终端，配对信息写到当前用户目录（只本人可读），供输入法自动发现 | ✅ |
 | FLASH-P2-07 | 测试（子 agent）+ 端到端冒烟 + 文档 | ⬜ |
 | FLASH-P2-08 | **详细 API 文档**（Gavin 10-29「Flashasr 开发完毕，要生成一份详细的 api 文档，方便调用者查阅和接入开发」）：在 `docs/ASR-PROTOCOL.md` 基础上出完整接入文档 —— 连接与配对、鉴权、`run-task` 全部参数与默认值、结果 / 译文 / 逐字时间格式、错误码全表与处理建议、`/v1/status`、声纹接口、时序图、多语言调用示例（Python / JavaScript / Kotlin / Swift 片段）、版本兼容规则。flashasr 功能开发完毕后做 | ⬜ |

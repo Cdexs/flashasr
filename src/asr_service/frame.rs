@@ -31,6 +31,8 @@ pub(crate) enum Kind {
     Cancel = 0x05,
     Login = 0x06,
     Logout = 0x07,
+    /// FLASH-P2-05：网关 → 内核：重置某终端的声纹（内容 = 终端编号 UTF-8；会话号 0）。
+    ResetVoiceprint = 0x08,
     Result = 0x81,
     End = 0x82,
 }
@@ -45,6 +47,7 @@ impl Kind {
             0x05 => Self::Cancel,
             0x06 => Self::Login,
             0x07 => Self::Logout,
+            0x08 => Self::ResetVoiceprint,
             0x81 => Self::Result,
             0x82 => Self::End,
             _ => return None,
@@ -158,6 +161,22 @@ pub(crate) struct OpenParams {
     /// FLASH-P0-510：输出优化（`feiyin.output_optimization_enabled`；默认关）。大模型用服务端统一配置。
     #[serde(default)]
     pub optimize: bool,
+    /// FLASH-P2-05：终端采集的场景（`feiyin.scene`），供输出优化按场景调整写法；没带 ⇒ 场景未知。
+    #[serde(default)]
+    pub scene: Option<ScenePayload>,
+}
+
+/// FLASH-P2-05：终端带来的场景（帧与网关共用，不依赖 `scene` 模块；内核换算成 `SceneContext`）。
+/// 窗口标题不在这里 —— 隐私边界同本机（`send_window_title` 默认不外发）。
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct ScenePayload {
+    /// `chat` / `agent` / `email` / `doc` / `ide_terminal` / `browser`；其它 ⇒ 未知。
+    pub kind: String,
+    /// 风格提示（终端场景规则表给出的那句）。
+    pub style_hint: String,
+    /// 落点窗口能否安全粘贴多行（终端按本机词表判定）。
+    pub multiline_safe: bool,
 }
 
 fn yes() -> bool {
@@ -178,6 +197,7 @@ impl Default for OpenParams {
             strip_trailing: false,
             traditional: None,
             optimize: false,
+            scene: None,
         }
     }
 }
@@ -190,7 +210,7 @@ pub(crate) struct TranslationPayload {
 }
 
 /// `Result` 帧内容。`text` 恒为**本会话至今的完整文本**（不是增量），终端整段替换显示即可。
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct ResultPayload {
     /// `true` = 终稿（会话最后一帧结果，此后不再改）。
     pub is_final: bool,
@@ -205,6 +225,15 @@ pub(crate) struct ResultPayload {
     /// S10：终稿且终端要了翻译、翻译成功 ⇒ 译文；否则 `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub translation: Option<TranslationPayload>,
+    /// FLASH-P2-05（终稿）：终端 `vocabulary` 里出现在终稿中的词（终端拿去记词库命中）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wordbook_hits: Vec<String>,
+    /// FLASH-P2-05（终稿）：输出优化给出的词库学习建议（终端自行决定是否加入词库）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub learn_suggestions: Vec<String>,
+    /// FLASH-P2-05（终稿）：要了输出优化但没做成的原因：`llm_not_configured` / `llm_failed`；做成或没要 ⇒ 空。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub optimization_skipped: String,
 }
 
 /// S9：一个词（阿里 `sentence.words[]` 同形）+ 时间来源。时间为毫秒，相对本会话第一帧音频。
@@ -232,6 +261,9 @@ pub(crate) struct EndPayload {
     /// 终稿字数（统计用，S5）。
     #[serde(default)]
     pub chars: usize,
+    /// FLASH-P2-05：有效语音毫秒数（VAD 去静音；VAD 不可用 ⇒ 整段长度）。终端记使用统计用。
+    #[serde(default)]
+    pub speech_ms: u64,
 }
 
 #[cfg(test)]
@@ -260,6 +292,7 @@ mod tests {
                         punctuation: String::new(),
                         source: "aligned".into(),
                     }],
+                    ..Default::default()
                 },
             ),
         ];
@@ -314,6 +347,7 @@ mod tests {
             text: "你".into(),
             tentative: 1,
             words: Vec::new(),
+            ..Default::default()
         };
         let v = serde_json::to_value(&empty).unwrap();
         assert!(v.get("words").is_none(), "空 words 不序列化：{v}");
@@ -369,6 +403,7 @@ mod tests {
             text: "你好".into(),
             tentative: 0,
             words: Vec::new(),
+            ..Default::default()
         };
         let v = serde_json::to_value(&r).unwrap();
         assert!(v.get("translation").is_none(), "{v}");

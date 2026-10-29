@@ -101,6 +101,7 @@ pub(crate) fn run_remote_session(
         script,
         model_dir: model_dir.clone(),
         strip_trailing: params.strip_trailing,
+        scene: text_stage::scene_from_payload(params.scene.as_ref()),
         // FLASH-P0-513：开翻译时大模型一次做「优化 + 翻译」（见 `text_stage::translate`），原文不再单独过大模型。
         optimize: params.optimize && !params.translate,
     };
@@ -231,6 +232,7 @@ pub(crate) fn run_remote_session(
                     ),
                     text,
                     translation: None,
+                    ..Default::default()
                 });
             }
         }
@@ -293,7 +295,8 @@ pub(crate) fn run_remote_session(
     let text = text_normalizer::normalize_text_for_language(final_src.trim(), script);
     let times = char_times::transfer(&final_src, &src_times, &text);
     // S10：内置节点 + 终端三项参数；要了翻译 ⇒ 另出一份译文（失败不给）。
-    let (text, times) = text_stage::apply_final(&text, &times, &opts, config);
+    let mut extras = text_stage::FinalExtras::default();
+    let (text, times) = text_stage::apply_final_with(&text, &times, &opts, config, &mut extras);
     let translation = if params.translate {
         text_stage::translate(&text, config, &opts, params.optimize)
     } else {
@@ -306,16 +309,35 @@ pub(crate) fn run_remote_session(
         tentative: 0,
         words: result_words(&text, &times, pcm_secs),
         translation,
+        wordbook_hits: wordbook_hits(&params.vocabulary, &text),
+        learn_suggestions: extras.learn_suggestions,
+        optimization_skipped: extras.optimization_skipped.to_string(),
     });
+    // FLASH-P2-05：有效语音时长（独立一份 VAD，不碰进程级缓存）；VAD 不可用 ⇒ 整段长度。终稿已发出，不拖终稿。
+    let speech_ms = transcription::effective_speech_ms_isolated(&pcm)
+        .unwrap_or_else(|| (pcm.len() as u64) / 16);
     RemoteOutcome {
         end: EndPayload {
             error: String::new(),
             audio_secs: pcm.len() as f32 / 16000.0,
             chars,
+            speech_ms,
         },
         text,
         pcm,
     }
+}
+
+/// FLASH-P2-05：终端词表里出现在终稿中的词（去重保序，空白忽略）。终端拿去记词库命中。
+fn wordbook_hits(vocabulary: &[String], text: &str) -> Vec<String> {
+    let mut hits: Vec<String> = Vec::new();
+    for v in vocabulary {
+        let v = v.trim();
+        if !v.is_empty() && text.contains(v) && !hits.iter().any(|h| h == v) {
+            hits.push(v.to_string());
+        }
+    }
+    hits
 }
 
 /// S9（T4）：精解为空、终稿退回预览收尾文本时的逐字时间 —— 录音不长 ⇒ 整段强制对齐一次（录音时间轴，
@@ -494,7 +516,8 @@ mod tests {
         // 2. 节点调用次数：apply_preview / preview_tentative / apply_final 各恰 1 次。
         let apply_preview = concat!("text_stage::", "apply_preview", "(");
         let preview_tentative = concat!("text_stage::", "preview_tentative", "(");
-        let apply_final = concat!("text_stage::", "apply_final", "(");
+        // FLASH-P2-05：会话改调 `apply_final_with`（同一节点链 + 附带产物）。
+        let apply_final = concat!("text_stage::", "apply_final_with", "(");
         let n_preview = prod.iter().filter(|l| l.contains(apply_preview)).count();
         let n_tentative = prod
             .iter()
@@ -598,5 +621,19 @@ mod tests {
             body.contains("ifvia_llm&&crate::should_try_llm_translate("),
             "{body}"
         );
+    }
+
+    /// FLASH-P2-05：词库命中 = 终端词表里出现在终稿中的词，去重保序、空白忽略。
+    #[test]
+    fn wordbook_hits_from_terminal_vocabulary() {
+        let v: Vec<String> = ["飞音", "LiveKit", "飞音", " ", "没出现"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            wordbook_hits(&v, "用飞音接 LiveKit，飞音很好用"),
+            vec!["飞音".to_string(), "LiveKit".to_string()]
+        );
+        assert!(wordbook_hits(&v, "").is_empty());
     }
 }

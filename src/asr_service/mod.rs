@@ -217,6 +217,17 @@ fn serve_conn(conn: transport::Conn, runtime_config: &Arc<RwLock<AppConfig>>) {
                 terminal: String::from_utf8_lossy(&f.body).into_owned(),
             }),
             Kind::Logout => stats.send(stats::StatsOp::Logout { conn: f.session }),
+            // FLASH-P2-05：终端要求重置自己的声纹 ⇒ 丢掉内存里那份 + 删档（之后从零重新累积）。
+            Kind::ResetVoiceprint => {
+                let id = String::from_utf8_lossy(&f.body).into_owned();
+                if let Some(owner) = transcription::speaker::VpOwner::terminal(&id) {
+                    transcription::speaker::finish_terminal_voiceprint(&owner, false);
+                }
+                match crate::asr_shared::purge_terminal_voiceprint(&id) {
+                    Ok(()) => log::info!("[flashasr] voiceprint reset for terminal {id}"),
+                    Err(e) => log::warn!("[flashasr] voiceprint reset for {id} failed: {e}"),
+                }
+            }
             Kind::Hello | Kind::Result | Kind::End => {
                 log::warn!("[ASR-SERVER-491] unexpected frame {:?}", f.kind);
             }

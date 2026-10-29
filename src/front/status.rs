@@ -80,17 +80,28 @@ pub async fn read_head<S: AsyncRead + Unpin>(s: &mut S) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// 请求是 `GET /v1/status`（忽略查询串）⇒ `Some(Authorization 里的 bearer key)`（没带 ⇒ `Some(None)`）；
-/// 不是 ⇒ `None`（按 WebSocket 处理）。
-pub fn status_request(head: &[u8]) -> Option<Option<String>> {
+/// 普通 HTTP 接口（非 WebSocket）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Api {
+    /// `GET /v1/status`
+    Status,
+    /// `POST /v1/profile/voiceprint/reset`（FLASH-P2-05：重置调用方终端自己的声纹）
+    VoiceprintReset,
+}
+
+/// 请求是本模块的 HTTP 接口 ⇒ `Some((接口, Authorization 里的 bearer key))`（没带 key ⇒ 第二元 `None`）；
+/// 不是 ⇒ `None`（按 WebSocket 处理）。查询串忽略。
+pub fn api_request(head: &[u8]) -> Option<(Api, Option<String>)> {
     let text = std::str::from_utf8(head).ok()?;
     let mut lines = text.split("\r\n");
     let mut first = lines.next()?.split_whitespace();
     let (method, target) = (first.next()?, first.next()?);
     let path = target.split('?').next().unwrap_or(target);
-    if !method.eq_ignore_ascii_case("GET") || path != "/v1/status" {
-        return None;
-    }
+    let api = match (method.to_ascii_uppercase().as_str(), path) {
+        ("GET", "/v1/status") => Api::Status,
+        ("POST", "/v1/profile/voiceprint/reset") => Api::VoiceprintReset,
+        _ => return None,
+    };
     let key = lines
         .take_while(|l| !l.is_empty())
         .filter_map(|l| l.split_once(':'))
@@ -101,7 +112,7 @@ pub fn status_request(head: &[u8]) -> Option<Option<String>> {
                 .eq_ignore_ascii_case("bearer")
                 .then(|| key.trim().to_string())
         });
-    Some(key)
+    Some((api, key))
 }
 
 /// 状态内容（纯函数，便于单测）。
@@ -137,15 +148,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn recognizes_status_request_and_key() {
+    fn recognizes_api_requests_and_key() {
         let h = b"GET /v1/status HTTP/1.1\r\nHost: a\r\nAuthorization: Bearer ABC-123\r\n\r\n";
-        assert_eq!(status_request(h), Some(Some("ABC-123".to_string())));
+        assert_eq!(
+            api_request(h),
+            Some((Api::Status, Some("ABC-123".to_string())))
+        );
         let h = b"GET /v1/status?x=1 HTTP/1.1\r\nHost: a\r\n\r\n";
-        assert_eq!(status_request(h), Some(None), "没带 key");
+        assert_eq!(api_request(h), Some((Api::Status, None)), "没带 key");
+        let h = b"POST /v1/profile/voiceprint/reset HTTP/1.1\r\nAuthorization: bearer K\r\n\r\n";
+        assert_eq!(
+            api_request(h),
+            Some((Api::VoiceprintReset, Some("K".to_string())))
+        );
         let h = b"GET /api-ws/v1/inference HTTP/1.1\r\nUpgrade: websocket\r\n\r\n";
-        assert_eq!(status_request(h), None, "WebSocket 升级不归这里");
-        assert_eq!(status_request(b"POST /v1/status HTTP/1.1\r\n\r\n"), None);
-        assert_eq!(status_request(b"\xff\xfe"), None);
+        assert_eq!(api_request(h), None, "WebSocket 升级不归这里");
+        assert_eq!(api_request(b"POST /v1/status HTTP/1.1\r\n\r\n"), None);
+        assert_eq!(
+            api_request(b"GET /v1/profile/voiceprint/reset HTTP/1.1\r\n\r\n"),
+            None
+        );
+        assert_eq!(api_request(b"\xff\xfe"), None);
     }
 
     #[test]

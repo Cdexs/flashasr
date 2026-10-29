@@ -274,6 +274,19 @@ impl CompiledRules {
     }
 }
 
+/// FLASH-P2-05：终端经网络带来的场景类别（不打「未知 kind」警告 —— 那是给本机规则表用的）。
+pub(crate) fn kind_from_str(s: &str) -> SceneKind {
+    match s.trim().to_lowercase().as_str() {
+        "chat" => SceneKind::Chat,
+        "agent" | "ai_agent" | "ai-agent" | "coding_agent" => SceneKind::Agent,
+        "email" => SceneKind::Email,
+        "doc" => SceneKind::Doc,
+        "ide_terminal" | "ide-terminal" | "ide/terminal" => SceneKind::IdeTerminal,
+        "browser" => SceneKind::Browser,
+        _ => SceneKind::Unknown,
+    }
+}
+
 fn parse_kind(s: &str) -> SceneKind {
     match s.trim().to_lowercase().as_str() {
         "chat" => SceneKind::Chat,

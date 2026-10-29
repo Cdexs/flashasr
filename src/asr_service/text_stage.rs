@@ -40,6 +40,32 @@ pub(crate) struct TextOpts {
     pub strip_trailing: bool,
     /// FLASH-P0-510：输出优化（终端参数；大模型用服务端统一配置）。
     pub optimize: bool,
+    /// FLASH-P2-05：终端带来的场景（输出优化 / 大模型翻译按场景调整写法）；没带 ⇒ 未知。
+    pub scene: crate::scene::SceneContext,
+}
+
+/// FLASH-P2-05：终稿处理的附带产物（随终稿回给终端）。
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(crate) struct FinalExtras {
+    /// 输出优化给出的词库学习建议。
+    pub learn_suggestions: Vec<String>,
+    /// 要了输出优化但没做成的原因（`llm_not_configured` / `llm_failed`）；做成或没要 ⇒ 空。
+    pub optimization_skipped: &'static str,
+}
+
+/// FLASH-P2-05：终端场景 ⇒ `SceneContext`。窗口标题 / 程序名不经网络传（隐私边界同本机）。
+pub(crate) fn scene_from_payload(
+    p: Option<&super::frame::ScenePayload>,
+) -> crate::scene::SceneContext {
+    let Some(p) = p else {
+        return crate::scene::SceneContext::unknown();
+    };
+    crate::scene::SceneContext {
+        scene: crate::scene::kind_from_str(&p.kind),
+        multiline_safe: p.multiline_safe,
+        style_hint: p.style_hint.trim().to_string(),
+        ..crate::scene::SceneContext::unknown()
+    }
 }
 
 type Times = Vec<Option<CharTime>>;
@@ -111,6 +137,17 @@ pub(crate) fn apply_final(
     o: &TextOpts,
     config: &AppConfig,
 ) -> (String, Times) {
+    apply_final_with(text, times, o, config, &mut FinalExtras::default())
+}
+
+/// 同 [`apply_final`]，另把附带产物（学习建议、输出优化没做成的原因）写进 `extras`（FLASH-P2-05）。
+pub(crate) fn apply_final_with(
+    text: &str,
+    times: &[Option<CharTime>],
+    o: &TextOpts,
+    config: &AppConfig,
+    extras: &mut FinalExtras,
+) -> (String, Times) {
     // FLASH-P0-508（DEC-112）：开标点 ⇒ 先剥光，交下游标点模型整段按语义重打（同本机 `strip_punctuation_node`）。
     let cur = if o.punctuation {
         step(text.to_string(), times.to_vec(), |t| {
@@ -135,10 +172,21 @@ pub(crate) fn apply_final(
     } else {
         cur
     };
-    let optimized = o
-        .optimize
-        .then(|| llm_optimize(&cur.0, &raw_text, config, o))
-        .flatten();
+    let optimized = if o.optimize {
+        match llm_optimize(&cur.0, &raw_text, config, o) {
+            Ok(Some((t, suggestions))) => {
+                extras.learn_suggestions = suggestions;
+                Some(t)
+            }
+            Ok(None) => None,
+            Err(why) => {
+                extras.optimization_skipped = why;
+                None
+            }
+        }
+    } else {
+        None
+    };
     let llm_handled = optimized.is_some();
     let cur = match optimized {
         Some(t) => step(cur.0, cur.1, |_| t),
@@ -164,20 +212,25 @@ pub(crate) fn apply_final(
 /// FLASH-P0-510：输出优化（同本机 `run_llm_stage` 非翻译分支）：大模型用服务端统一配置；场景未知、
 /// 不多行（远程不知道落点窗口）、不外发窗口标题；学习建议不写服务端本机词库（P2 起随结果回给终端）。
 /// 服务端没开大模型 / 调用失败 ⇒ `None`（调用方照常走繁简规整 + 标点模型，同本机失败兜底）。
+/// 返回：`Ok(Some((文字, 学习建议)))` = 做成；`Ok(None)` = 文字为空无需做；`Err(原因)` = 没做成
+///（`llm_not_configured` 服务端没开 / 没填大模型；`llm_failed` 调用失败或返回空）。
 fn llm_optimize(
     pre_llm_text: &str,
     raw_text: &str,
     config: &AppConfig,
     o: &TextOpts,
-) -> Option<String> {
-    if !config.llm.enabled {
+) -> Result<Option<(String, Vec<String>)>, &'static str> {
+    if !config.llm.enabled
+        || config.llm.api_url.trim().is_empty()
+        || config.llm.api_key.trim().is_empty()
+    {
         log::info!(
-            "[FLASH-P0-510] output optimization requested but server LLM not enabled; skipped"
+            "[FLASH-P0-510] output optimization requested but server LLM not configured; skipped"
         );
-        return None;
+        return Err(SKIP_LLM_NOT_CONFIGURED);
     }
     if pre_llm_text.trim().is_empty() {
-        return None;
+        return Ok(None);
     }
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -186,34 +239,42 @@ fn llm_optimize(
         Ok(rt) => rt,
         Err(e) => {
             log::warn!("[FLASH-P0-510] remote LLM optimize: runtime failed: {e}");
-            return None;
+            return Err(SKIP_LLM_FAILED);
         }
     };
     let client = crate::llm::LlmClient::new(config.llm.clone());
     let script_instruction = text_normalizer::script_instruction(raw_text, o.script);
-    let scene = crate::scene::SceneContext::unknown();
+    // FLASH-P2-05：用终端带来的场景（没带 ⇒ 未知、不多行）。窗口标题不外发。
     match rt.block_on(client.optimize(
         pre_llm_text,
         script_instruction,
         o.punctuation,
-        Some(&scene),
-        scene.multiline_safe,
+        Some(&o.scene),
+        o.scene.multiline_safe,
         false,
     )) {
         Ok(r) if !r.text.trim().is_empty() => {
             // 同本机 FMT-LLM-005：大模型输出只做繁简（不动大小写）。
-            Some(text_normalizer::normalize_script_only(&r.text, o.script))
+            let suggestions = r.suggestions.into_iter().map(|s| s.word).collect();
+            Ok(Some((
+                text_normalizer::normalize_script_only(&r.text, o.script),
+                suggestions,
+            )))
         }
         Ok(_) => {
             log::warn!("[FLASH-P0-510] remote LLM optimize returned empty text");
-            None
+            Err(SKIP_LLM_FAILED)
         }
         Err(e) => {
             log::warn!("[FLASH-P0-510] remote LLM optimize failed, falling back: {e}");
-            None
+            Err(SKIP_LLM_FAILED)
         }
     }
 }
+
+/// FLASH-P2-05：输出优化没做成的原因（随终稿 `output.feiyin.optimization_skipped` 回给终端）。
+pub(crate) const SKIP_LLM_NOT_CONFIGURED: &str = "llm_not_configured";
+pub(crate) const SKIP_LLM_FAILED: &str = "llm_failed";
 
 /// 补标点：已有有效标点（1.7B 原生 / 精解线程补过）⇒ 不动（防 334 `。。` 叠加，同本机
 /// `pretranscribed_native_punctuated`）；日韩 ⇒ 日韩专用标点；其余 ⇒ 进程级标点服务
@@ -292,7 +353,8 @@ fn llm_translate(
     let client = crate::llm::LlmClient::new(config.llm.clone());
     let script_instruction =
         text_normalizer::script_instruction_for_translate(text, config.audio.chinese_script);
-    let scene = crate::scene::SceneContext::unknown();
+    // FLASH-P2-05：大模型翻译同样用终端场景。
+    let scene = o.scene.clone();
     match rt.block_on(client.optimize_and_translate(
         text,
         target,
@@ -390,6 +452,7 @@ mod tests {
             model_dir: std::env::temp_dir().join("feiyin-text-stage-test-no-such-models"),
             strip_trailing: false,
             optimize: false,
+            scene: crate::scene::SceneContext::unknown(),
         }
     }
 
@@ -823,5 +886,45 @@ mod tests {
         let times = times_for(short);
         let (out, _) = apply_final(short, &times, &o, &cfg());
         assert_eq!(out, "好的", "短句 punc=true 应剥句末标点: {out:?}");
+    }
+
+    /// FLASH-P2-05：终端场景 ⇒ SceneContext；没带 / 认不出 ⇒ 未知；不带窗口标题。
+    #[test]
+    fn scene_payload_mapping() {
+        use super::super::frame::ScenePayload;
+        assert!(scene_from_payload(None).is_unknown());
+        let p = ScenePayload {
+            kind: "Email".into(),
+            style_hint: " 正式书面 ".into(),
+            multiline_safe: true,
+        };
+        let s = scene_from_payload(Some(&p));
+        assert_eq!(s.scene, crate::scene::SceneKind::Email);
+        assert_eq!(s.style_hint, "正式书面");
+        assert!(s.multiline_safe);
+        assert!(s.window_title.is_empty() && s.app_exe.is_empty());
+        let p = ScenePayload {
+            kind: "klingon".into(),
+            ..Default::default()
+        };
+        assert!(scene_from_payload(Some(&p)).is_unknown());
+    }
+
+    /// FLASH-P2-05：要了输出优化但服务端没配大模型 ⇒ 附带原因 `llm_not_configured`，文字照常（同不优化）。
+    #[test]
+    fn optimization_skipped_reason_when_not_configured() {
+        let text = "今天天气很好，我们出去玩吧。";
+        let mut o = opts(true, false);
+        o.optimize = true;
+        let mut ex = FinalExtras::default();
+        let (f, _) = apply_final_with(text, &times_for(text), &o, &cfg(), &mut ex);
+        assert_eq!(ex.optimization_skipped, SKIP_LLM_NOT_CONFIGURED);
+        assert!(ex.learn_suggestions.is_empty());
+        let (base, _) = apply_final(text, &times_for(text), &opts(true, false), &cfg());
+        assert_eq!(f, base);
+        // 没要输出优化 ⇒ 不报原因。
+        let mut ex = FinalExtras::default();
+        let _ = apply_final_with(text, &times_for(text), &opts(true, false), &cfg(), &mut ex);
+        assert!(ex.optimization_skipped.is_empty());
     }
 }
