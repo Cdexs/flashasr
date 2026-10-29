@@ -60,14 +60,13 @@ pub enum AsrMode {
     Streaming,
 }
 
-/// 识别引擎。FLASH-P1-05（DEC-114）：flashasr 只留两个 —— 在线 FunASR 与本地实时；
-/// 「本地模型 - 快速」（performance）、「本地模型 - 长音频」（accuracy）、在线 Qwen Audio 不再支持，
-/// 「连另一台电脑的识别服务」是输入法（客户端）的事，服务端没有。
+/// 识别引擎。flashasr **只做本地实时**（DEC-114）：
+/// - FLASH-P1-05：「本地模型 - 快速」（performance）、「本地模型 - 长音频」（accuracy）、在线 Qwen Audio 删除；
+/// - FLASH-P2-02（Gavin 10-29「我们自己后端的 FlashASR 就不保留直连 FunASR 的能力了，不做这个中转了，
+///   只做我们本地实时语音识别服务」）：在线 FunASR 删除（在线识别由输入法直连阿里）。
+/// 保留枚举（而不是直接删类型）：搬来的本地实时代码以它为判据，原样可读。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AsrModel {
-    /// 在线流式 ASR —— FunASR Realtime（ASR-056）：
-    /// DashScope Inference 协议（`qwen_inference.rs`）。Gavin 研究发现比 qwen-audio-3.0-asr-flash-streaming 快。
-    FunAsrRealtime,
     /// LOCAL-RT-ENGINE-239-A（DEC-067）：本地流式实时档（极客档，DEC-065 默认隐藏）。
     ///
     /// **双模型并存常驻**（有意打破「本地一次只加载一个模型」）：
@@ -79,21 +78,9 @@ pub enum AsrModel {
 }
 
 impl AsrModel {
-    /// `fun_asr_realtime` ⇒ 在线 FunASR；其余（含旧值 performance / accuracy / qwen_audio_online）⇒ 本地实时。
-    pub fn from_config(s: &str) -> Self {
-        if s.eq_ignore_ascii_case("fun_asr_realtime") {
-            AsrModel::FunAsrRealtime
-        } else {
-            AsrModel::LocalRealtime
-        }
-    }
-
-    /// ASR-056: 收敛判据——是否走在线流式管线（真流式 record_streaming + transcribe_streaming_realtime）。
-    ///
-    /// 新增在线模型时只改这一处，不必逐个更新 main.rs 的 12 处引用点。
-    /// QwenAudioOnline 和 FunAsrRealtime 都走真流式管线（共用 qwen_inference.rs 实现）。
-    pub fn is_online_streaming(&self) -> bool {
-        matches!(self, AsrModel::FunAsrRealtime)
+    /// 只有本地实时：任何配置值（含旧值 performance / accuracy / qwen_audio_online / fun_asr_realtime）⇒ 本地实时。
+    pub fn from_config(_s: &str) -> Self {
+        AsrModel::LocalRealtime
     }
 
     /// FIX-LOCALRT-ENGINE-EQ-252: 是否使用 **accuracy 引擎**（FunASR Nano native）。
@@ -1862,39 +1849,10 @@ impl Transcriber {
             AsrMode::Offline
         };
 
-        // DEC-028 / ASR-038-B / ASR-041-B / ASR-056: 在线 ASR 模式不加载本地模型
-        // ASR-056: QwenAudioOnline 与 FunAsrRealtime 都走此路径（is_online_streaming 收敛判据）
-        if asr_model.is_online_streaming() {
-            // ASR-SERVER-491 S8：自家识别服务不用 API Key（凭配对文件里的 key），没配对在建连时报「去配对」。
-            if asr_online_api_key.trim().is_empty() {
-                anyhow::bail!("在线 ASR 配置失败：API Key 为空（请在设置中配置 API Key）");
-            }
-            log::info!(
-                "Online ASR mode: no local model loaded, model={:?}, url={}",
-                asr_model,
-                asr_online_url
-            );
-            return Ok(Self {
-                mode,
-                asr_language,
-                asr_model,
-                offline_recognizer: None,
-                preview_recognizer: None,
-                hotwords_version: 0,
-                vad_segmenter: OnceLock::from(None),
-                vad_model_dir: PathBuf::new(),
-                asr_online_api_key: asr_online_api_key.to_string(),
-                asr_online_url: asr_online_url.to_string(),
-                asr_online_model: asr_online_model.to_string(),
-                asr_online_max_sentence_silence,
-                asr_online_semantic_punctuation_enabled,
-            });
-        }
-
         // LOCAL-RT-ENGINE-239-A（DEC-067）：LocalRealtime 双模型并存常驻。
         // 与 accuracy 不同：**不做静默降级**，任一模型缺失/加载失败即 Err（附则一），
         // 因为降级就是「用户以为用 A 实际跑 B」的不一致（ASR-UI-208 判定）。
-        // FLASH-P1-05：非在线即本地实时（只剩这两个引擎）。
+        // FLASH-P2-02：只有本地实时。
         {
             let (preview_recognizer, mut offline_recognizer, hotwords_version) =
                 build_local_realtime_recognizers(model_dir, &asr_language, hotwords)?;
@@ -2080,33 +2038,6 @@ impl Transcriber {
         samples: &[f32],
         script: ChineseScript,
     ) -> Result<(String, bool)> {
-        // ASR-038-B / ASR-056: 在线流式 ASR 路径（非流式回退：录完整段再发）
-        // QwenAudioOnline 与 FunAsrRealtime 都走此路径（is_online_streaming 收敛判据）。
-        // 流式管线在 main.rs 的 run_streaming_pipeline 中直接调用 qwen_inference::transcribe_streaming，
-        // 此分支仅用于非流式回退（如模型切换过渡期）
-        if self.asr_model.is_online_streaming() {
-            let vocabulary = crate::transcription::load_wordbook_vocabulary();
-            let text = qwen_inference::transcribe_streaming(
-                &self.asr_online_url,
-                &self.asr_online_api_key,
-                &self.asr_online_model,
-                samples,
-                &vocabulary,
-                self.asr_online_max_sentence_silence,
-                self.asr_online_semantic_punctuation_enabled,
-                None,
-                |_| {},
-            )?;
-            let cleaned = Self::strip_asr_special_tokens(&text);
-            let trimmed = cleaned.trim();
-            if trimmed.is_empty() {
-                // BUG-119: 在线回退路径空输出 = 没识别到语音，类型化信息信号
-                anyhow::bail!(NoSpeechError);
-            }
-            let normalized = text_normalizer::normalize_text_for_language(trimmed, script);
-            let native_punctuated = punctuation::has_effective_punctuation(&normalized);
-            return Ok((normalized, native_punctuated));
-        }
         match self.mode {
             AsrMode::Offline => self.transcribe_offline_detailed(samples, script),
             AsrMode::Streaming => self.transcribe_2pass_detailed(samples, script),
@@ -3540,34 +3471,24 @@ pub fn load_wordbook_word_array() -> serde_json::Value {
 mod tests {
     use super::*;
 
-    /// FLASH-P1-05（DEC-114）：只剩两个引擎；旧配置值（performance / accuracy / qwen_audio_online / 空 / 乱写）一律落本地实时。
+    /// FLASH-P2-02（DEC-114）：只剩本地实时；任何旧配置值都落本地实时。
     #[test]
-    fn flashasr_only_two_engines() {
-        assert_eq!(
-            AsrModel::from_config("fun_asr_realtime"),
-            AsrModel::FunAsrRealtime
-        );
-        assert_eq!(
-            AsrModel::from_config("FUN_ASR_REALTIME"),
-            AsrModel::FunAsrRealtime
-        );
-        for s in [
+    fn flashasr_only_local_realtime() {
+        for v in [
             "local_realtime",
+            "fun_asr_realtime",
             "performance",
             "accuracy",
             "qwen_audio_online",
             "",
             "garbage",
         ] {
-            assert_eq!(AsrModel::from_config(s), AsrModel::LocalRealtime, "{s:?}");
+            assert_eq!(AsrModel::from_config(v), AsrModel::LocalRealtime, "{v:?}");
         }
-        assert!(AsrModel::FunAsrRealtime.is_online_streaming());
-        assert!(!AsrModel::LocalRealtime.is_online_streaming());
         assert!(AsrModel::LocalRealtime.uses_accuracy_engine());
-        assert!(!AsrModel::FunAsrRealtime.uses_accuracy_engine());
         // 穷举：新增变体会让这里编不过，逼着更新判据。
         match AsrModel::LocalRealtime {
-            AsrModel::FunAsrRealtime | AsrModel::LocalRealtime => {}
+            AsrModel::LocalRealtime => {}
         }
     }
 
