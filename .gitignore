@@ -1,0 +1,7 @@
+/target/
+node_modules/
+/models/
+/localtest/
+/Publish/
+CLAUDE.md
+*.log
