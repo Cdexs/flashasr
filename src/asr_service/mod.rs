@@ -14,7 +14,6 @@ mod compose;
 mod frame;
 mod session;
 mod stats;
-pub(crate) mod supervisor;
 mod text_stage;
 mod transport;
 

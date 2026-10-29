@@ -396,6 +396,8 @@ fn end_code(e: &str) -> &'static str {
     match e {
         "not_ready" => "ModelNotReady",
         "capacity" => "ServiceBusy",
+        // FLASH-P2-01：引擎崩溃 / 重启时进行中的会话（前台 `core_link`）。
+        "engine_restarted" => "EngineRestarted",
         "bad_request" => "InvalidParameter",
         _ => "InternalError",
     }

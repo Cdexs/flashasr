@@ -3,15 +3,15 @@ name = "flashasr"
 version = "0.1.0"
 edition = "2021"
 
-# FLASH-P1：识别服务内核（无界面：加载本地实时模型、IPC、拉起网关）。
+# FLASH-P2-01：前台（常驻、单实例）：对外协议 + 加密 + 终端配对 + 管理通道；拉起并看护引擎。不加载模型。
 [[bin]]
-name = "flashasr-core"
-path = "src/core/main.rs"
+name = "flashasr"
+path = "src/front/main.rs"
 
-# FLASH-P1：识别服务网关（对外协议 + 加密 + 终端配对；不加载模型，经本机 IPC 调内核）。
+# FLASH-P2-01：引擎（由前台拉起）：本地实时模型、在线 FunASR 转发、识别会话、文字处理。
 [[bin]]
-name = "flashasr-gateway"
-path = "src/gateway/main.rs"
+name = "flashasr-engine"
+path = "src/engine/main.rs"
 
 [features]
 # 本地 PoC / 离线实验测试（文件不入库）；默认关。

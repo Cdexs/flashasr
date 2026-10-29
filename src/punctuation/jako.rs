@@ -328,8 +328,8 @@ mod tests {
     #[test]
     fn jako466_only_called_after_jako_detection() {
         for (name, src) in [
-            // FLASH-P1：输入法 `main.rs` 的本地标点节点在本仓库是 `core/glue.rs`；服务端文字处理另一处调用点。
-            ("core/glue.rs", include_str!("../core/glue.rs")),
+            // FLASH-P1：输入法 `main.rs` 的本地标点节点在本仓库是 `engine/glue.rs`；服务端文字处理另一处调用点。
+            ("engine/glue.rs", include_str!("../engine/glue.rs")),
             (
                 "asr_service/text_stage.rs",
                 include_str!("../asr_service/text_stage.rs"),
