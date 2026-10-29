@@ -2330,5 +2330,4 @@ mod sc485_tests {
         cfg.apply_shortcut(ShortcutAction::StripTrailingToggle);
         assert_eq!(cfg.punctuation.strip_trailing, before);
     }
-
 }

@@ -18,17 +18,7 @@ pub mod qwen_inference;
 pub(crate) mod llama_asr;
 pub(crate) mod speaker;
 mod vad;
-// PoC / 离线实验代码不入库（Gavin 2026-10-17「以后 POC 方案和相关的代码不要推送到库里」）：
-// 文件只在本地（.gitignore 排除），声明受 `poc` 特性控制 —— 不开特性时编译器不读这些文件，
-// 全新 clone 照常编译。本地跑：`cargo test --features poc --bin feiyin-ime <名字> -- --ignored --nocapture`。
-#[cfg(all(test, feature = "poc"))]
-mod poc_asr_server_491;
-#[cfg(all(test, feature = "poc"))]
-mod poc_gpu_451;
-#[cfg(all(test, feature = "poc"))]
-mod poc_slice_cut_381;
-#[cfg(all(test, feature = "poc"))]
-mod poc_voiceprint_short_444;
+// PoC / 离线实验代码不搬进 flashasr（留在 voice-ime 本地，不入库）。
 #[cfg(all(test, feature = "poc"))]
 mod replay436_tests;
 // SLIDING-WINDOW-367：路A 逐片解码摘接线后，`join_segment_texts` 等 re-export 暂无人用；
@@ -70,19 +60,13 @@ pub enum AsrMode {
     Streaming,
 }
 
-/// ASR 模型选择（DEC-025 + DEC-028 + ASR-056）
+/// 识别引擎。FLASH-P1-05（DEC-114）：flashasr 只留两个 —— 在线 FunASR 与本地实时；
+/// 「本地模型 - 快速」（performance）、「本地模型 - 长音频」（accuracy）、在线 Qwen Audio 不再支持，
+/// 「连另一台电脑的识别服务」是输入法（客户端）的事，服务端没有。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AsrModel {
-    /// 性能最优：179MB FunASR Nano CTC 兼容版（OfflineSenseVoiceModelConfig，无 hotwords）
-    Performance,
-    /// 准确率更高：972MB FunASR Nano native（OfflineFunASRNanoModelConfig，config 层 hotwords）
-    Accuracy,
-    /// 在线流式 ASR —— Qwen Audio 3.0（RESEARCH-ASR-038 / ASR-041-B）：
-    /// DashScope Inference 协议，模型 ID qwen-audio-3.0-asr-flash-streaming
-    QwenAudioOnline,
     /// 在线流式 ASR —— FunASR Realtime（ASR-056）：
-    /// 与 QwenAudioOnline 共用同一 WS 端点 + 同一 Inference 协议 + 同一返回结构，
-    /// 仅 model 名与部分参数取值不同。Gavin 研究发现比 qwen-audio-3.0-asr-flash-streaming 快。
+    /// DashScope Inference 协议（`qwen_inference.rs`）。Gavin 研究发现比 qwen-audio-3.0-asr-flash-streaming 快。
     FunAsrRealtime,
     /// LOCAL-RT-ENGINE-239-A（DEC-067）：本地流式实时档（极客档，DEC-065 默认隐藏）。
     ///
@@ -92,25 +76,15 @@ pub enum AsrModel {
     ///
     /// DEC-067 附则一：任一模型缺失/加载失败 ⇒ 整档 `Err`，**禁止静默降级**。
     LocalRealtime,
-    /// ASR-SERVER-491 S8：连另一台电脑上的飞音识别服务（`run-task` 同协议，设计 §8）。
-    /// 走在线流式管线；地址 / key / 证书指纹取自配对文件 `asr-remote.json`，不用 API Key，不加载本地模型。
-    FeiyinServer,
 }
 
 impl AsrModel {
+    /// `fun_asr_realtime` ⇒ 在线 FunASR；其余（含旧值 performance / accuracy / qwen_audio_online）⇒ 本地实时。
     pub fn from_config(s: &str) -> Self {
-        if s.eq_ignore_ascii_case("accuracy") {
-            AsrModel::Accuracy
-        } else if s.eq_ignore_ascii_case("qwen_audio_online") {
-            AsrModel::QwenAudioOnline
-        } else if s.eq_ignore_ascii_case("fun_asr_realtime") {
+        if s.eq_ignore_ascii_case("fun_asr_realtime") {
             AsrModel::FunAsrRealtime
-        } else if s.eq_ignore_ascii_case("local_realtime") {
-            AsrModel::LocalRealtime
-        } else if s.eq_ignore_ascii_case("feiyin_server") {
-            AsrModel::FeiyinServer
         } else {
-            AsrModel::Performance
+            AsrModel::LocalRealtime
         }
     }
 
@@ -119,10 +93,7 @@ impl AsrModel {
     /// 新增在线模型时只改这一处，不必逐个更新 main.rs 的 12 处引用点。
     /// QwenAudioOnline 和 FunAsrRealtime 都走真流式管线（共用 qwen_inference.rs 实现）。
     pub fn is_online_streaming(&self) -> bool {
-        matches!(
-            self,
-            AsrModel::QwenAudioOnline | AsrModel::FunAsrRealtime | AsrModel::FeiyinServer
-        )
+        matches!(self, AsrModel::FunAsrRealtime)
     }
 
     /// FIX-LOCALRT-ENGINE-EQ-252: 是否使用 **accuracy 引擎**（FunASR Nano native）。
@@ -134,7 +105,7 @@ impl AsrModel {
     /// 🔴 收敛点：`== AsrModel::Accuracy` 这类相等比较**编译器不会报错**，新增变体极易漏改
     /// （本单两个端测 bug 即由此而来）。新增使用 accuracy 引擎的档位时，只改这一处。
     pub fn uses_accuracy_engine(self) -> bool {
-        matches!(self, AsrModel::Accuracy | AsrModel::LocalRealtime)
+        matches!(self, AsrModel::LocalRealtime)
     }
 }
 
@@ -1895,7 +1866,7 @@ impl Transcriber {
         // ASR-056: QwenAudioOnline 与 FunAsrRealtime 都走此路径（is_online_streaming 收敛判据）
         if asr_model.is_online_streaming() {
             // ASR-SERVER-491 S8：自家识别服务不用 API Key（凭配对文件里的 key），没配对在建连时报「去配对」。
-            if asr_model != AsrModel::FeiyinServer && asr_online_api_key.trim().is_empty() {
+            if asr_online_api_key.trim().is_empty() {
                 anyhow::bail!("在线 ASR 配置失败：API Key 为空（请在设置中配置 API Key）");
             }
             log::info!(
@@ -1923,7 +1894,8 @@ impl Transcriber {
         // LOCAL-RT-ENGINE-239-A（DEC-067）：LocalRealtime 双模型并存常驻。
         // 与 accuracy 不同：**不做静默降级**，任一模型缺失/加载失败即 Err（附则一），
         // 因为降级就是「用户以为用 A 实际跑 B」的不一致（ASR-UI-208 判定）。
-        if asr_model == AsrModel::LocalRealtime {
+        // FLASH-P1-05：非在线即本地实时（只剩这两个引擎）。
+        {
             let (preview_recognizer, mut offline_recognizer, hotwords_version) =
                 build_local_realtime_recognizers(model_dir, &asr_language, hotwords)?;
             // FORCED-ALIGN-456：本地实时挂强制对齐器（窗口接缝按逐字时间拼接）。
@@ -1958,37 +1930,6 @@ impl Transcriber {
                 asr_online_semantic_punctuation_enabled,
             });
         }
-
-        let (offline_recognizer, effective_model, hotwords_version) =
-            build_recognizer(model_dir, &asr_language, asr_model, hotwords)?;
-
-        // VAD 分段器仅使用 accuracy 引擎的档位初始化；performance 模式设 None
-        // R2: 用 effective_model 判断（降级 CTC 时不初始化 VAD）
-        // FIX-LOCALRT-ENGINE-EQ-252: 判据收敛到 uses_accuracy_engine()（含 LocalRealtime）
-        let vad_segmenter = if effective_model.uses_accuracy_engine() {
-            // accuracy 引擎档位立即尝试初始化（模型文件在则建，失败后续降级）
-            vad::VadSegmenter::try_new(model_dir).map(Mutex::new)
-        } else {
-            None
-        };
-
-        Ok(Self {
-            mode,
-            asr_language,
-            asr_model: effective_model,
-            offline_recognizer: Some(offline_recognizer),
-            // LOCAL-RT-ENGINE-239-A（DEC-067）：仅 LocalRealtime 档并存预览 recognizer；
-            // Performance/Accuracy 无预览侧，在线档已在上面提前返回。
-            preview_recognizer: None,
-            hotwords_version,
-            vad_segmenter: OnceLock::from(vad_segmenter),
-            vad_model_dir: PathBuf::new(),
-            asr_online_api_key: String::new(),
-            asr_online_url: String::new(),
-            asr_online_model: String::new(),
-            asr_online_max_sentence_silence,
-            asr_online_semantic_punctuation_enabled,
-        })
     }
 
     pub fn asr_model(&self) -> AsrModel {
@@ -2145,35 +2086,17 @@ impl Transcriber {
         // 此分支仅用于非流式回退（如模型切换过渡期）
         if self.asr_model.is_online_streaming() {
             let vocabulary = crate::transcription::load_wordbook_vocabulary();
-            let text = if self.asr_model == AsrModel::FeiyinServer {
-                // ASR-SERVER-491 S8：整段切 100ms 小块喂同一个会话函数（不另写一套批量协议）。
-                let (tx, rx) = crossbeam_channel::unbounded::<Vec<f32>>();
-                for c in samples.chunks(1600) {
-                    let _ = tx.send(c.to_vec());
-                }
-                drop(tx);
-                qwen_inference::transcribe_streaming_feiyin(
-                    &crate::asr_shared::remote::RemotePairing::load(),
-                    rx,
-                    &vocabulary,
-                    &self.vad_model_dir,
-                    None,
-                    |_, _| {},
-                )?
-                .text
-            } else {
-                qwen_inference::transcribe_streaming(
-                    &self.asr_online_url,
-                    &self.asr_online_api_key,
-                    &self.asr_online_model,
-                    samples,
-                    &vocabulary,
-                    self.asr_online_max_sentence_silence,
-                    self.asr_online_semantic_punctuation_enabled,
-                    None,
-                    |_| {},
-                )?
-            };
+            let text = qwen_inference::transcribe_streaming(
+                &self.asr_online_url,
+                &self.asr_online_api_key,
+                &self.asr_online_model,
+                samples,
+                &vocabulary,
+                self.asr_online_max_sentence_silence,
+                self.asr_online_semantic_punctuation_enabled,
+                None,
+                |_| {},
+            )?;
             let cleaned = Self::strip_asr_special_tokens(&text);
             let trimmed = cleaned.trim();
             if trimmed.is_empty() {
@@ -3380,88 +3303,6 @@ pub fn build_hotwords_string(entries: &[String]) -> String {
     curate_hotwords_entries(entries).join(",")
 }
 
-/// 构建 recognizer（ASR-SINGLE-MODEL-001：单模型加载，不再创建 fallback）
-/// 返回 (主 recognizer, 生效模型, hotwords_version)
-///
-/// R2 修订（验收第 2 轮）：返回 effective_model 解决降级语义错标。
-/// accuracy 分支 native 加载失败 → 降级 CTC，effective_model=Performance，
-/// Transcriber 存 effective_model 作为 asr_model——三处语义自动归位：
-/// ① CTC 输出标 native_punctuated=false（下游标点模块正常走）
-/// ② 空输出走 performance bail 语义（不 accuracy bail）
-/// ③ 不触发 VAD 分段（performance 不分段）
-fn build_recognizer(
-    model_dir: &Path,
-    language: &str,
-    asr_model: AsrModel,
-    hotwords: Option<&str>,
-) -> Result<(OfflineEngine, AsrModel, u64)> {
-    let hotwords_version = match hotwords {
-        Some(h) => {
-            let count = h.split(',').filter(|s| !s.trim().is_empty()).count();
-            let mut hasher = DefaultHasher::new();
-            count.hash(&mut hasher);
-            h.hash(&mut hasher);
-            hasher.finish()
-        }
-        None => 0,
-    };
-
-    match asr_model {
-        AsrModel::Performance => {
-            let recognizer = create_sensevoice_recognizer(model_dir, language)?;
-            Ok((
-                OfflineEngine::SenseVoice(recognizer),
-                AsrModel::Performance,
-                hotwords_version,
-            ))
-        }
-        AsrModel::Accuracy => {
-            // ASR-SINGLE-MODEL-001: accuracy 分支尝试加载 native 模型；失败则降级 performance
-            // 不再预创建 CTC fallback recognizer（省 ~250-350MB 常驻）
-            //
-            // MIGRATE-QWEN3-320：accuracy 档就是 Qwen3（不再有引擎分派/回滚开关）。
-            // 🔴 `hotwords` **不塞 config** —— 词库与上下文走 accuracy worker 的 per-stream 注入（320）。
-            let loaded = create_qwen3_recognizer(model_dir);
-            match loaded {
-                Ok(engine) => Ok((
-                    OfflineEngine::Qwen3(Arc::new(engine)),
-                    AsrModel::Accuracy,
-                    hotwords_version,
-                )),
-                Err(e) => {
-                    log::warn!(
-                        "Accuracy model load failed ({}), falling back to performance model",
-                        e
-                    );
-                    let recognizer = create_sensevoice_recognizer(model_dir, language)?;
-                    // R2: effective_model=Performance，Transcriber 存此值语义归位
-                    Ok((
-                        OfflineEngine::SenseVoice(recognizer),
-                        AsrModel::Performance,
-                        hotwords_version,
-                    ))
-                }
-            }
-        }
-        AsrModel::LocalRealtime => {
-            // LOCAL-RT-ENGINE-239-A（DEC-067）：LocalRealtime 需要 online + offline 双模型并存，
-            // 由 Transcriber::new 的专用分支经 build_local_realtime_recognizers() 构建；
-            // 本函数「返回单一 offline recognizer」的契约不适用该档，正常路径不会触达。
-            // 防御性 bail（非 panic），避免误用时静默返回半个模型。
-            anyhow::bail!(
-                "LocalRealtime requires dual-model construction; handled in Transcriber::new()"
-            )
-        }
-        AsrModel::QwenAudioOnline | AsrModel::FunAsrRealtime | AsrModel::FeiyinServer => {
-            // ASR-041-B / ASR-056: 在线 ASR 模式不加载本地模型，
-            // Transcriber::new() 已提前返回，此分支不应被触达
-            unreachable!(
-                "online ASR models should be handled in Transcriber::new() before build_recognizer"
-            )
-        }
-    }
-}
-
 /// LOCAL-RT-ENGINE-239-A（DEC-067）：LocalRealtime 双模型构建。
 ///
 /// - online  = streaming paraformer trilingual（本地预览，greedy_search）
@@ -3699,116 +3540,41 @@ pub fn load_wordbook_word_array() -> serde_json::Value {
 mod tests {
     use super::*;
 
+    /// FLASH-P1-05（DEC-114）：只剩两个引擎；旧配置值（performance / accuracy / qwen_audio_online / 空 / 乱写）一律落本地实时。
     #[test]
-    fn asr_model_from_config_parses_values() {
-        assert_eq!(AsrModel::from_config("performance"), AsrModel::Performance);
-        assert_eq!(AsrModel::from_config("accuracy"), AsrModel::Accuracy);
-        assert_eq!(AsrModel::from_config("Performance"), AsrModel::Performance);
-        assert_eq!(AsrModel::from_config("ACCURACY"), AsrModel::Accuracy);
-        assert_eq!(AsrModel::from_config(""), AsrModel::Performance);
-        assert_eq!(AsrModel::from_config("garbage"), AsrModel::Performance);
-        // ASR-041-B: Qwen3Online 已删除，qwen3_online 字符串由迁移逻辑改写为 qwen_audio_online
-        // from_config 不再认 qwen3_online（迁移在 load 阶段已改写）
-        // ASR-038-B: QwenAudioOnline 解析
+    fn flashasr_only_two_engines() {
         assert_eq!(
-            AsrModel::from_config("qwen_audio_online"),
-            AsrModel::QwenAudioOnline
+            AsrModel::from_config("fun_asr_realtime"),
+            AsrModel::FunAsrRealtime
         );
         assert_eq!(
-            AsrModel::from_config("QWEN_AUDIO_ONLINE"),
-            AsrModel::QwenAudioOnline
+            AsrModel::from_config("FUN_ASR_REALTIME"),
+            AsrModel::FunAsrRealtime
         );
+        for s in [
+            "local_realtime",
+            "performance",
+            "accuracy",
+            "qwen_audio_online",
+            "",
+            "garbage",
+        ] {
+            assert_eq!(AsrModel::from_config(s), AsrModel::LocalRealtime, "{s:?}");
+        }
+        assert!(AsrModel::FunAsrRealtime.is_online_streaming());
+        assert!(!AsrModel::LocalRealtime.is_online_streaming());
+        assert!(AsrModel::LocalRealtime.uses_accuracy_engine());
+        assert!(!AsrModel::FunAsrRealtime.uses_accuracy_engine());
+        // 穷举：新增变体会让这里编不过，逼着更新判据。
+        match AsrModel::LocalRealtime {
+            AsrModel::FunAsrRealtime | AsrModel::LocalRealtime => {}
+        }
     }
 
     // ============================================================
     // ASR-038-B: Transcriber QwenAudioOnline 独立配置字段验证
     // 回归防护：A 批错误复用 qwen3_url 调 Inference 协议，B 批修正为独立 asr_online_url
     // ============================================================
-
-    /// ASR-038-B-005: QwenAudioOnline 模式 Transcriber::new 存在线 ASR 配置
-    /// （不加载本地模型，new 不依赖 model_dir 存在性，可直接测）
-    #[test]
-    fn transcriber_qwen_audio_online_stores_independent_config() {
-        let model_dir = std::path::Path::new("nonexistent-model-dir-for-test");
-        let t = Transcriber::new(
-            model_dir,
-            false,
-            "auto".to_string(),
-            AsrModel::QwenAudioOnline,
-            None,
-            "sk-test-key",
-            "wss://llm-kudx4dj2bfqn4gr2.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference",
-            "qwen-audio-3.0-asr-flash-streaming",
-            800,
-            false,
-        )
-        .expect("QwenAudioOnline Transcriber::new should succeed without local models");
-        assert_eq!(t.asr_model(), AsrModel::QwenAudioOnline);
-        assert_eq!(
-            t.asr_online_url(),
-            "wss://llm-kudx4dj2bfqn4gr2.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference"
-        );
-        assert_eq!(t.asr_online_model(), "qwen-audio-3.0-asr-flash-streaming");
-        // ASR-056: max_sentence_silence 存储
-        assert_eq!(t.asr_online_max_sentence_silence(), 800);
-    }
-
-    /// TEST-SYNC-229 G3: 两轴参数透传链不断 —— `Transcriber::new` 传入什么，
-    /// getter 就返回什么（防中途丢参 / 重新硬编码）。
-    /// 用非默认值（轴一 1234 ≠ 2000、轴二 true ≠ false）才能与「写死默认值」区分开；
-    /// 传默认值就算字段被丢弃、getter 直接返回默认常量也会假绿。
-    #[test]
-    fn transcriber_seg229_two_axis_passthrough_stores_exact_values() {
-        let model_dir = std::path::Path::new("nonexistent-model-dir-for-test");
-        let t = Transcriber::new(
-            model_dir,
-            false,
-            "auto".to_string(),
-            AsrModel::QwenAudioOnline,
-            None,
-            "sk-test-key",
-            "wss://inference.example.com",
-            "qwen-audio-3.0-asr-flash-streaming",
-            1234,
-            true,
-        )
-        .expect("QwenAudioOnline Transcriber::new should succeed without local models");
-        assert_eq!(
-            t.asr_online_max_sentence_silence(),
-            1234,
-            "轴一：传入 1234 必须原样返回（非默认 2000，可区分写死默认）"
-        );
-        assert_eq!(
-            t.asr_online_semantic_punctuation_enabled(),
-            true,
-            "轴二：传入 true 必须原样返回（默认 false，可区分写死默认）"
-        );
-    }
-
-    /// ASR-038-B-006: QwenAudioOnline 模式 API Key 空 → bail
-    #[test]
-    fn transcriber_qwen_audio_online_empty_key_bails() {
-        let model_dir = std::path::Path::new("nonexistent-model-dir-for-test");
-        let result = Transcriber::new(
-            model_dir,
-            false,
-            "auto".to_string(),
-            AsrModel::QwenAudioOnline,
-            None,
-            "",
-            "wss://inference.example.com",
-            "qwen-audio-3.0-asr-flash-streaming",
-            800,
-            false,
-        );
-        assert!(result.is_err());
-        let err_msg = result.err().unwrap().to_string();
-        assert!(
-            err_msg.contains("API Key 为空"),
-            "empty API key should bail with clear message, got: {}",
-            err_msg
-        );
-    }
 
     #[test]
     fn hotwords_version_stable_for_same_input() {
@@ -4514,61 +4280,6 @@ mod tests {
         );
     }
 
-    /// R2: build_recognizer 返回 3-tuple (recognizer, effective_model, hotwords_version)。
-    /// accuracy 降级 CTC 时 effective_model=Performance（语义归位三处）。
-    ///
-    /// 此测试验证降级场景：model_dir 下只有 CTC 模型（native 缺失），
-    /// 请求 accuracy → native 加载失败 → 降级 CTC → effective_model=Performance。
-    /// 需要 SenseVoice CTC 模型存在于项目 models/ 目录。
-    #[test]
-    #[ignore = "requires SenseVoice CTC model in project models/ dir"]
-    fn build_recognizer_accuracy_degraded_to_performance_effective_model() {
-        let project_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let model_dir = project_root.join("models");
-        // 请求 accuracy，但 native 模型路径下放一个假目录使加载失败
-        // 实际项目 models/ 下 native 模型若存在则此测试需构造缺失场景。
-        // 此处验证返回签名结构 + effective_model 语义：
-        // 若 native 加载成功 → effective=Accuracy；若失败降级 → effective=Performance
-        let result = build_recognizer(&model_dir, "zh", AsrModel::Accuracy, None);
-        match result {
-            Ok((_recognizer, effective_model, _hw_ver)) => {
-                // effective_model 必须是 AsrModel 枚举值之一
-                assert!(
-                    effective_model == AsrModel::Accuracy
-                        || effective_model == AsrModel::Performance,
-                    "effective_model must be valid AsrModel variant"
-                );
-                // 若 native 存在 → Accuracy；若缺失降级 → Performance
-                // 关键：effective_model 不再恒 Accuracy（降级时正确归位 Performance）
-            }
-            Err(e) => {
-                // 两个模型都缺失才 Err，本机至少有一个则不会到这
-                eprintln!("build_recognizer err (models may be missing): {}", e);
-            }
-        }
-    }
-
-    /// R2 纯逻辑验证：build_recognizer 返回元组 arity 正确（3 个元素），
-    /// effective_model 是 AsrModel 类型。此测试文档化签名契约，
-    /// 防止未来重构误改返回类型（如漏掉 effective_model）。
-    #[test]
-    fn build_recognizer_return_signature_contract() {
-        // 编译期断言：build_recognizer 返回 Result<(OfflineRecognizer, AsrModel, u64)>
-        // 此函数签名由类型系统保证，此处文档化契约供未来维护者参考。
-        // 关键：第 2 个元素必须是 AsrModel（effective_model），不能省略。
-        fn _type_check<F>(_f: F)
-        where
-            F: Fn(&Path, &str, AsrModel, Option<&str>) -> Result<(OfflineEngine, AsrModel, u64)>,
-        {
-        }
-        _type_check(build_recognizer);
-        // 若此测试编译通过，签名契约满足
-        assert!(
-            true,
-            "build_recognizer signature contract: 3-tuple with effective_model"
-        );
-    }
-
     /// R1 纯逻辑验证：transcribe_segments_chunked 是 Transcriber 的方法，
     /// 接收 segments 切片返回 Result<(String, bool)>。此测试文档化契约：
     /// - 辅助函数消除 VAD 分段 / naive_chunk 两路径的重复转录循环
@@ -4756,75 +4467,6 @@ mod tests {
     fn strip_asr_special_tokens_empty() {
         // 空串：幂等返回空串
         assert_eq!(Transcriber::strip_asr_special_tokens(""), "");
-    }
-
-    /// ASR-041-B-补 / ASR-056: AsrModel 恰好四变体
-    /// （Performance/Accuracy/QwenAudioOnline/FunAsrRealtime）。
-    /// Gavin 明确保留 Accuracy，防将来误删该变体。
-    /// ASR-056 新增 FunAsrRealtime（与 QwenAudioOnline 共用 Inference 协议）。
-    /// 用穷举 match 而非断言计数：删任一变体 → 本 match 编译失败（比 `== 4` 强）。
-    /// 每个变体都走一遍 from_config 正反向，钉住字符串 ↔ 变体映射不被破坏。
-    #[test]
-    fn asr_model_exactly_four_variants_with_stable_mapping() {
-        // 穷举四变体：新增/删除变体都会在此编译失败（编译期护栏）
-        let _exhaustive: fn(AsrModel) = |m| match m {
-            AsrModel::Performance
-            | AsrModel::Accuracy
-            | AsrModel::QwenAudioOnline
-            | AsrModel::FunAsrRealtime
-            | AsrModel::LocalRealtime
-            | AsrModel::FeiyinServer => (),
-        };
-
-        // from_config 正反向映射（大小写不敏感）
-        assert_eq!(AsrModel::from_config("performance"), AsrModel::Performance);
-        assert_eq!(AsrModel::from_config("accuracy"), AsrModel::Accuracy);
-        assert_eq!(
-            AsrModel::from_config("qwen_audio_online"),
-            AsrModel::QwenAudioOnline
-        );
-        assert_eq!(
-            AsrModel::from_config("QwEn_AuDiO_oNlInE"),
-            AsrModel::QwenAudioOnline
-        );
-        // ASR-SERVER-491 S8
-        assert_eq!(
-            AsrModel::from_config("feiyin_server"),
-            AsrModel::FeiyinServer
-        );
-        // ASR-056: fun_asr_realtime 映射
-        assert_eq!(
-            AsrModel::from_config("fun_asr_realtime"),
-            AsrModel::FunAsrRealtime
-        );
-        assert_eq!(
-            AsrModel::from_config("FuN_AsR_ReAlTiMe"),
-            AsrModel::FunAsrRealtime
-        );
-        // 未知字符串回落 Performance（不 panic）
-        assert_eq!(AsrModel::from_config("qwen3_online"), AsrModel::Performance);
-        assert_eq!(AsrModel::from_config(""), AsrModel::Performance);
-    }
-
-    /// ASR-056: is_online_streaming() 收敛判据——QwenAudioOnline 和 FunAsrRealtime 都返回 true
-    #[test]
-    fn asr_056_is_online_streaming_correct_for_all_variants() {
-        assert!(
-            !AsrModel::Performance.is_online_streaming(),
-            "Performance must not be online streaming"
-        );
-        assert!(
-            !AsrModel::Accuracy.is_online_streaming(),
-            "Accuracy must not be online streaming"
-        );
-        assert!(
-            AsrModel::QwenAudioOnline.is_online_streaming(),
-            "QwenAudioOnline must be online streaming"
-        );
-        assert!(
-            AsrModel::FunAsrRealtime.is_online_streaming(),
-            "FunAsrRealtime must be online streaming"
-        );
     }
 }
 
