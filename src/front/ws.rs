@@ -182,6 +182,25 @@ impl Shared {
         })
     }
 
+    /// FLASH-P2-06：保证有一个可用的本机终端：`existing_key` 仍有效且是本机终端 ⇒ 沿用；否则新建。
+    /// 返回 `(终端编号, key 明文)`。
+    pub fn ensure_local_terminal(
+        &self,
+        existing_key: Option<&str>,
+    ) -> std::io::Result<(String, String)> {
+        let now = now_ts();
+        self.with_store_io(|st| {
+            if let Some(k) = existing_key {
+                if let Ok(t) = st.check_key(k, now) {
+                    if t.local {
+                        return Ok((t.id.clone(), k.to_string()));
+                    }
+                }
+            }
+            st.create_local(now)
+        })
+    }
+
     /// 撤销：key 作废 + 该终端所有在线连接断开。返回是否找到该终端。
     pub fn revoke(&self, terminal_id: &str) -> bool {
         let found = self.with_store(|st| {
@@ -263,6 +282,14 @@ pub fn net_kind(ip: IpAddr) -> &'static str {
     }
 }
 
+/// FLASH-P2-06：本机终端的 key 只接受本机回环来源（泄露了也不能从别处用）。
+fn local_from_loopback(local: bool, ip: IpAddr) -> Result<(), AuthError> {
+    if local && !ip.is_loopback() {
+        return Err(AuthError::InvalidKey);
+    }
+    Ok(())
+}
+
 fn bearer(req: &Request) -> Option<String> {
     let v = req.headers().get("authorization")?.to_str().ok()?.trim();
     let (scheme, key) = v.split_once(' ')?;
@@ -319,7 +346,9 @@ pub async fn serve_conn(
                 };
                 let checked = {
                     let _g = lock(&sh.store);
-                    TerminalStore::load().check_key(&k, now_ts()).map(|_| ())
+                    TerminalStore::load()
+                        .check_key(&k, now_ts())
+                        .and_then(|t| local_from_loopback(t.local, ip))
                 };
                 match checked {
                     Ok(()) => {
@@ -386,7 +415,10 @@ async fn answer_status(
     use tokio::io::AsyncWriteExt;
     let ok = key.is_some_and(|k| {
         let _g = lock(&shared.store);
-        TerminalStore::load().check_key(&k, now_ts()).is_ok()
+        TerminalStore::load()
+            .check_key(&k, now_ts())
+            .and_then(|t| local_from_loopback(t.local, ip))
+            .is_ok()
     });
     let resp = if ok {
         let st = shared.core.engine_status();

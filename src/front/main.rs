@@ -21,6 +21,7 @@ mod transport;
 
 mod core_link;
 mod ctl;
+mod local_pair;
 mod status;
 mod tls;
 mod ws;
@@ -191,6 +192,8 @@ fn run(settings: ServiceSettings) -> std::io::Result<()> {
     let link = core_link::CoreLink::start()?;
     let shared = Arc::new(ws::Shared::new(link, settings.port, fp));
     shared.prune();
+    // FLASH-P2-06：本机输入法自动发现用的配对文件。
+    local_pair::ensure(&shared, settings.port);
     ctl::start(shared.clone())?;
 
     let rt = tokio::runtime::Builder::new_current_thread()

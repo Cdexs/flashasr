@@ -30,6 +30,9 @@ pub struct Terminal {
     /// 最近一次接入方式：`lan` / `wan`。
     pub last_net: String,
     pub revoked: bool,
+    /// FLASH-P2-06：本机终端（flashasr 首次运行自动建，供本机输入法自动发现）：不受绑定时限约束
+    ///（输入法可能隔很久才第一次连），其 key 只接受本机回环来源（网关握手时判，见 `ws.rs`）。
+    pub local: bool,
 }
 
 impl Terminal {
@@ -148,6 +151,15 @@ impl TerminalStore {
         Ok((id, key))
     }
 
+    /// FLASH-P2-06：建本机终端（同 [`Self::create`]，带 `local` 标记）。
+    pub fn create_local(&mut self, now: i64) -> std::io::Result<(String, String)> {
+        let (id, key) = self.create(now)?;
+        if let Some(t) = self.get_mut(&id) {
+            t.local = true;
+        }
+        Ok((id, key))
+    }
+
     /// 只认 key（WebSocket 握手时用，此时还不知道设备代码）：存在、未撤销、未过绑定时限。
     pub fn check_key(&self, key: &str, now: i64) -> Result<&Terminal, AuthError> {
         let h = sha256_hex(&normalize_key(key));
@@ -159,7 +171,7 @@ impl TerminalStore {
         if t.revoked {
             return Err(AuthError::Revoked);
         }
-        if !t.bound() && now - t.created_ts > BIND_WINDOW_SECS {
+        if !t.bound() && !t.local && now - t.created_ts > BIND_WINDOW_SECS {
             return Err(AuthError::Expired);
         }
         Ok(t)
@@ -215,7 +227,7 @@ impl TerminalStore {
     pub fn prune_expired(&mut self, now: i64) -> bool {
         let before = self.terminals.len();
         self.terminals
-            .retain(|t| t.bound() || now - t.created_ts <= BIND_WINDOW_SECS);
+            .retain(|t| t.bound() || t.local || now - t.created_ts <= BIND_WINDOW_SECS);
         self.terminals.len() != before
     }
 }
@@ -320,5 +332,20 @@ mod tests {
             pair_uri("10.0.0.2:7860", None, "K", "f"),
             "feiyin-asr://pair?v=1&lan=10.0.0.2:7860&key=K&fp=f"
         );
+    }
+
+    /// FLASH-P2-06：本机终端不受绑定时限约束、不被清理；撤销照常生效。
+    #[test]
+    fn local_terminal_never_expires_but_can_be_revoked() {
+        let mut st = TerminalStore::default();
+        let (id, key) = st.create_local(0).unwrap();
+        let later = BIND_WINDOW_SECS * 100;
+        assert!(st.check_key(&key, later).unwrap().local);
+        assert!(!st.prune_expired(later), "本机终端不被清理");
+        assert!(st.revoke(&id));
+        assert_eq!(st.check_key(&key, later).unwrap_err(), AuthError::Revoked);
+        // 普通终端照旧过期。
+        let (_, k2) = st.create(0).unwrap();
+        assert_eq!(st.check_key(&k2, later).unwrap_err(), AuthError::Expired);
     }
 }
