@@ -27,7 +27,7 @@ import feiyin_asr_client as c  # noqa: E402
 
 FP = "3f9a" * 16          # 64 位十六进制
 KEY = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"  # 测试用假 key
-URI = f"feiyin-asr://pair?v=1&lan=192.168.1.5:7860&wan=asr.example.com:7860&key={KEY}&fp={FP}"
+URI = f"flash-asr://pair?v=1&lan=192.168.1.5:7860&wan=asr.example.com:7860&key={KEY}&fp={FP}"
 
 
 # ------------------------------------------------------------ 连接码 §1.1 / §1.2
@@ -46,34 +46,34 @@ class PairingTests(unittest.TestCase):
 
     def test_missing_fp(self):
         with self.assertRaises(c.UsageError):
-            c.parse_pair_uri(f"feiyin-asr://pair?v=1&lan=1.2.3.4:7860&key={KEY}")
+            c.parse_pair_uri(f"flash-asr://pair?v=1&lan=1.2.3.4:7860&key={KEY}")
 
     def test_missing_key_and_address(self):
         with self.assertRaises(c.UsageError):
-            c.parse_pair_uri(f"feiyin-asr://pair?v=1&lan=1.2.3.4&fp={FP}")
+            c.parse_pair_uri(f"flash-asr://pair?v=1&lan=1.2.3.4&fp={FP}")
         with self.assertRaises(c.UsageError):
-            c.parse_pair_uri(f"feiyin-asr://pair?v=1&key={KEY}&fp={FP}")
+            c.parse_pair_uri(f"flash-asr://pair?v=1&key={KEY}&fp={FP}")
 
     def test_bad_prefix(self):
         with self.assertRaises(c.UsageError):
             c.parse_pair_uri("http://example.com/?v=1")
 
     def test_percent_encoded(self):
-        code = f"feiyin-asr://pair?v=1&lan=192.168.1.5%3A7861&key=ABCD%2DEFGH&fp={FP.upper()}"
+        code = f"flash-asr://pair?v=1&lan=192.168.1.5%3A7861&key=ABCD%2DEFGH&fp={FP.upper()}"
         p = c.parse_pair_uri(code)
         self.assertEqual(p.lan, "192.168.1.5:7861")
         self.assertEqual(p.key, "ABCDEFGH")  # 解码后再规整：去连字符
         self.assertEqual(p.fp, FP)           # 指纹统一小写
 
     def test_ipv6(self):
-        code = f"feiyin-asr://pair?v=1&lan=%5Bfe80%3A%3A1%5D%3A9000&wan=[2001:db8::2]&key={KEY}&fp={FP}"
+        code = f"flash-asr://pair?v=1&lan=%5Bfe80%3A%3A1%5D%3A9000&wan=[2001:db8::2]&key={KEY}&fp={FP}"
         p = c.parse_pair_uri(code)
         self.assertEqual(p.lan, "[fe80::1]:9000")
         self.assertEqual(p.wan, "[2001:db8::2]:7860")
         self.assertEqual(c.split_endpoint(p.lan), ("fe80::1", 9000))
 
     def test_default_port(self):
-        p = c.parse_pair_uri(f"feiyin-asr://pair?v=1&lan=10.0.0.2&key={KEY}&fp={FP}")
+        p = c.parse_pair_uri(f"flash-asr://pair?v=1&lan=10.0.0.2&key={KEY}&fp={FP}")
         self.assertEqual(p.lan, "10.0.0.2:7860")
         self.assertEqual(p.wan, "")
 

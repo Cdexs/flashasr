@@ -8,7 +8,7 @@
 用法示例
 --------
 1) 用连接码（二维码的文字版）识别一个 16k 单声道 16 位 WAV：
-    py -3 feiyin_asr_client.py --code "feiyin-asr://pair?v=1&lan=192.168.1.5:7860&key=ABCD...&fp=3f9a..." --wav a.wav
+    py -3 feiyin_asr_client.py --code "flash-asr://pair?v=1&lan=192.168.1.5:7860&key=ABCD...&fp=3f9a..." --wav a.wav
 
 2) 手输地址 + key + 指纹，只走外网，裸 PCM，不等实时节奏：
     py -3 feiyin_asr_client.py --wan asr.example.com:7860 --key ABCD-EFGH-... --fp 3f9a... --mode wan --pcm a.pcm --fast
@@ -60,7 +60,7 @@ EXIT_AUDIO = 7
 EXIT_PROTOCOL = 8
 
 DEFAULT_PORT = 7860                 # §1.1 缺端口补 7860
-PAIR_PREFIX = "feiyin-asr://pair?"  # §1.1
+PAIR_PREFIX = "flash-asr://pair?"  # §1.1
 HANDSHAKE_TIMEOUT = 10.0            # §2.3 TLS + 升级须在 10 秒内完成
 TCP_PROBE_TIMEOUT = 5.0
 WAN_GRACE = 0.3                     # §2.1 外网先通后再等内网 300ms
@@ -197,11 +197,11 @@ def _finish_pairing(lan, wan, key, fp, *, need_key, need_fp):
 
 
 def parse_pair_uri(code):
-    """§1.1：解析 `feiyin-asr://pair?v=1&lan=..&wan=..&key=..&fp=..`。
+    """§1.1：解析 `flash-asr://pair?v=1&lan=..&wan=..&key=..&fp=..`。
     百分号解码；未知字段忽略；v 必须是 1（否则拒绝并提示升级）；fp、key 必有；lan/wan 二选一。"""
     code = (code or "").strip()
     if not code.startswith(PAIR_PREFIX):
-        raise UsageError("不是飞音连接码（应以 feiyin-asr://pair? 开头）")
+        raise UsageError("不是 flashasr 连接码（应以 flash-asr://pair? 开头）")
     fields = {}
     for kv in code[len(PAIR_PREFIX):].split("&"):
         k, _, v = kv.partition("=")
@@ -776,7 +776,7 @@ def run_recognition(ws, pcm, args, device_id, device_name, printer):
 # ================================================================ 命令行
 def build_parser():
     p = argparse.ArgumentParser(description="飞音识别服务 Python 参考客户端（见 docs/ASR-PROTOCOL.md）")
-    p.add_argument("--code", help="连接码 feiyin-asr://pair?...（§1.1）")
+    p.add_argument("--code", help="连接码 flash-asr://pair?...（§1.1）")
     p.add_argument("--lan", help="内网地址 主机[:端口]")
     p.add_argument("--wan", help="外网地址 主机[:端口]")
     p.add_argument("--key", help="终端 key（可带空白/连字符，大小写不限）")

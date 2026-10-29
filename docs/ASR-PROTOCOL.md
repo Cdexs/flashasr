@@ -21,7 +21,7 @@
 ### 1.1 连接码 / 二维码内容
 
 ```
-feiyin-asr://pair?v=1&lan=192.168.1.5:7860&wan=asr.example.com:7860&key=ABCDEFGHIJKLMNOPQRSTUVWXYZ&fp=3f9a…（64 位十六进制）
+flash-asr://pair?v=1&lan=192.168.1.5:7860&wan=asr.example.com:7860&key=ABCDEFGHIJKLMNOPQRSTUVWXYZ&fp=3f9a…（64 位十六进制）
 ```
 
 | 字段 | 必有 | 说明 |
@@ -68,7 +68,7 @@ flashasr 每次启动都会保证有一个「本机终端」，并把它的连�
 | macOS | `~/Library/Application Support/flashasr/local-pairing.json`（权限 0600） |
 
 ```json
-{ "terminal_id": "pgzmdppb", "uri": "feiyin-asr://pair?v=1&lan=127.0.0.1:7860&key=…&fp=…", "port": 7860 }
+{ "terminal_id": "pgzmdppb", "uri": "flash-asr://pair?v=1&lan=127.0.0.1:7860&key=…&fp=…", "port": 7860 }
 ```
 
 - `uri` 按 §1.1 解析即可，地址固定 `127.0.0.1`。

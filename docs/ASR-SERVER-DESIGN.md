@@ -216,7 +216,7 @@ pub fn run_session(
 | 没摄像头的电脑 | **连接码**（二维码的文字版，一串字符，复制粘贴一次即可） |
 | 想手输的 | 分开显示：内网地址:端口、外网地址:端口、key |
 
-二维码 / 连接码内容（示意）：`feiyin-asr://pair?v=1&lan=192.168.1.5:7860&wan=asr.example.com:7860&key=XXXX&fp=<证书指纹>`
+二维码 / 连接码内容（示意）：`flash-asr://pair?v=1&lan=192.168.1.5:7860&wan=asr.example.com:7860&key=XXXX&fp=<证书指纹>`
 
 ### 8.3 内网 / 外网怎么选
 
@@ -242,7 +242,7 @@ key 在公网上明文传输等于把 key 交给沿途的人。所以网关内�
 | 项 | 实际做法 |
 | --- | --- |
 | 配对存储 | `src/asr_shared/remote.rs`，文件 `asr-remote.json`（可执行文件同目录，**不进 config.toml**）。字段：`lan` / `wan`（主机:端口）、`key`（规整后的明文，本机连接的长期凭证）、`fingerprint`、`mode`（`auto` / `lan` / `wan`，默认 `auto`）、`device_id`（本机第一次配对时随机生成 16 位，之后固定，重新配对沿用）、`device_name`（空 = 取计算机名：Windows 读 `COMPUTERNAME`，macOS 用 `scutil --get ComputerName`，进程内只取一次） |
-| 连接码 / 手输 | 连接码 `feiyin-asr://pair?v=1&lan=..&wan=..&key=..&fp=..`：版本须为 1，未知字段忽略，必须带指纹。手输时指纹可空——先连过去取回对方指纹，让用户核对确认后再保存。地址没写端口补 7860，IPv6 须加方括号 |
+| 连接码 / 手输 | 连接码 `flash-asr://pair?v=1&lan=..&wan=..&key=..&fp=..`：版本须为 1，未知字段忽略，必须带指纹。手输时指纹可空——先连过去取回对方指纹，让用户核对确认后再保存。地址没写端口补 7860，IPv6 须加方括号 |
 | 证书钉扎 | `src/asr_shared/tls_pin.rs`（内核 / 网关 / 设置界面三方共用）：rustls 自定义校验器**只认配对时的指纹**（证书 DER 的 SHA-256），签名仍按 TLS 规范校验；只走 TLS 1.3。`probe_fingerprint` 只做 TLS 握手取指纹；`check_access` 做 TLS + WebSocket 升级握手（带 key） |
 | 内外网自动 | `src/transcription/feiyin_remote.rs`：「自动」= 内外网两个地址**同时**试 TCP（只试 TCP，不带 key）；内网通了直接用；外网先通则再等内网 300ms。⚠️ 与 §8.3 原文「先试内网，连不上再试外网」的差别：串行在出门时要干等内网超时（5 秒），改并发试，「内网优先」不变；每次录音重新挑，所以进出家门自动切换 |
 | 指纹确认时机 | ⚠️ 与 §8.5 原文「第一次连接时显示指纹让用户确认」的差别：提前到**配对保存时**确认（热键录音路径上不能弹确认框）。未确认的指纹不落盘，没确认就不会连 |

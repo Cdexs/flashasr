@@ -40,7 +40,7 @@ pub struct RemotePairing {
 /// 连接码 / 手输内容不合格的原因（界面按码取 i18n 文案）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PairError {
-    /// 不是 `feiyin-asr://pair?` 开头，或版本不认识。
+    /// 不是 `flash-asr://pair?` 开头，或版本不认识。
     BadCode,
     /// 内网、外网地址一个都没有 / 格式不对。
     BadAddress,
@@ -163,7 +163,7 @@ impl RemotePairing {
     pub fn from_pair_uri(code: &str) -> Result<Self, PairError> {
         let query = code
             .trim()
-            .strip_prefix("feiyin-asr://pair?")
+            .strip_prefix("flash-asr://pair?")
             .ok_or(PairError::BadCode)?;
         let mut p = Self::default();
         let mut version_ok = false;
@@ -304,20 +304,20 @@ mod tests {
             Err(PairError::BadCode)
         );
         assert_eq!(
-            RemotePairing::from_pair_uri("feiyin-asr://pair?v=2&lan=a:1&key=K&fp=00"),
+            RemotePairing::from_pair_uri("flash-asr://pair?v=2&lan=a:1&key=K&fp=00"),
             Err(PairError::BadCode),
             "不认识的版本"
         );
         assert_eq!(
-            RemotePairing::from_pair_uri(&format!("feiyin-asr://pair?v=1&key=K&fp={FP}")),
+            RemotePairing::from_pair_uri(&format!("flash-asr://pair?v=1&key=K&fp={FP}")),
             Err(PairError::BadAddress)
         );
         assert_eq!(
-            RemotePairing::from_pair_uri(&format!("feiyin-asr://pair?v=1&lan=a&fp={FP}")),
+            RemotePairing::from_pair_uri(&format!("flash-asr://pair?v=1&lan=a&fp={FP}")),
             Err(PairError::MissingKey)
         );
         assert_eq!(
-            RemotePairing::from_pair_uri("feiyin-asr://pair?v=1&lan=a&key=K&fp=12"),
+            RemotePairing::from_pair_uri("flash-asr://pair?v=1&lan=a&key=K&fp=12"),
             Err(PairError::BadFingerprint)
         );
     }

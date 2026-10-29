@@ -21,7 +21,7 @@ use crate::ws::Shared;
 pub struct LocalPairing {
     /// 本机终端编号（排查用）。
     pub terminal_id: String,
-    /// 连接码（`feiyin-asr://pair?v=1&lan=127.0.0.1:<端口>&key=…&fp=…`）。
+    /// 连接码（`flash-asr://pair?v=1&lan=127.0.0.1:<端口>&key=…&fp=…`）。
     pub uri: String,
     pub port: u16,
 }
@@ -100,9 +100,9 @@ mod tests {
 
     #[test]
     fn key_is_extracted_from_uri() {
-        let u = "feiyin-asr://pair?v=1&lan=127.0.0.1:7860&key=ABCD-EFGH&fp=00";
+        let u = "flash-asr://pair?v=1&lan=127.0.0.1:7860&key=ABCD-EFGH&fp=00";
         assert_eq!(key_of(u), Some("ABCD-EFGH"));
-        assert_eq!(key_of("feiyin-asr://pair?v=1&lan=a&key=&fp=0"), None);
+        assert_eq!(key_of("flash-asr://pair?v=1&lan=a&key=&fp=0"), None);
         assert_eq!(key_of("garbage"), None);
     }
 }
