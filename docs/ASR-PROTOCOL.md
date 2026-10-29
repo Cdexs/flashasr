@@ -1,9 +1,9 @@
-# 飞音识别服务 · 终端接入协议 v1
+# flashasr · 终端接入协议 v1
 
-> 给**另起项目的终端**（安卓 / iOS / 第三方程序）照着对接的契约。只描述线上能看到的行为，不依赖本仓库任何源码。
-> 本文与网关实现（`src/bin/feiyin-asr-gateway/`）逐条对应；两者不一致时以网关行为为准，并回来改本文。
+> 给终端（飞音输入法、安卓 / iOS / 第三方程序）照着对接的契约。只描述线上能看到的行为，不依赖本仓库任何源码。
+> 本文与前台程序 `flashasr`（`src/front/`）逐条对应；两者不一致时以程序行为为准，并回来改本文。
 > 参考实现：`tools/asr-client/feiyin_asr_client.py`（Python，可直接跑通全流程，见 §9）。
-> 版本：v1（2026-10-17，ASR-SERVER-491 一期）。
+> 版本：v1（2026-10-17 一期；2026-10-29 flashasr 0.1.0 增补 §1.5、§4.1 场景、§5.2 终稿扩展、§5.4 `speech_ms` / `EngineRestarted`、§5.5 HTTP 接口，均向后兼容）。
 
 ## 0. 一句话
 
@@ -16,7 +16,7 @@
 
 ## 1. 配对：拿到地址、key、指纹
 
-服务端（飞音输入法所在电脑）在设置页「添加终端」后给出三种等价形式：二维码、连接码（二维码的文字版）、分开显示的地址 + key。
+服务端（运行 flashasr 的电脑）「添加终端」后给出三种等价形式：二维码、连接码（二维码的文字版）、分开显示的地址 + key。
 
 ### 1.1 连接码 / 二维码内容
 
@@ -57,6 +57,23 @@ feiyin-asr://pair?v=1&lan=192.168.1.5:7860&wan=asr.example.com:7860&key=ABCDEFGH
 | `device_name` | 给服务端用户看的名字（如「Gavin 的 iPhone」），可随时改；改了下次请求自动更新 |
 
 两者都不能为空（去首尾空白后）。
+
+### 1.5 本机自动配对（终端与 flashasr 在同一台电脑）
+
+flashasr 每次启动都会保证有一个「本机终端」，并把它的连接码写到当前用户目录：
+
+| 系统 | 路径 |
+| --- | --- |
+| Windows | `%APPDATA%\flashasr\local-pairing.json` |
+| macOS | `~/Library/Application Support/flashasr/local-pairing.json`（权限 0600） |
+
+```json
+{ "terminal_id": "pgzmdppb", "uri": "feiyin-asr://pair?v=1&lan=127.0.0.1:7860&key=…&fp=…", "port": 7860 }
+```
+
+- `uri` 按 §1.1 解析即可，地址固定 `127.0.0.1`。
+- 本机终端的 key **永不过期**，但**只接受回环地址（127.0.0.1 / ::1）来的连接**；从别的机器用它连 ⇒ `InvalidKey`。
+- 被撤销或文件丢失 ⇒ flashasr 下次启动重建；改了端口 ⇒ key 不变、地址更新。终端连接失败时应重新读一次此文件。
 
 ---
 
@@ -141,12 +158,13 @@ Authorization: Bearer <key>
 | `parameters.feiyin.output_optimization_enabled` | | `false` | 输出优化（大模型整理文字）。大模型用服务端统一配置；服务端没配 ⇒ 跳过此步、照常出结果 |
 | `parameters.feiyin.strip_trailing_punct` | | `false` | 去掉句末标点（句中标点保留） |
 | `parameters.feiyin.chinese_script` | | 服务端设置 | `"simplified"` / `"traditional"`；其它值 ⇒ 跟服务端设置 |
+| `parameters.feiyin.scene` | | 未知场景 | 输入场景，供输出优化 / 大模型翻译调整写法：`{"kind": "chat", "style_hint": "", "multiline_safe": false}`。`kind` 取 `chat` / `agent` / `email` / `doc` / `ide_terminal` / `browser`，其它 ⇒ 未知；`style_hint` 自由文字风格提示（如「正式」）；`multiline_safe` = 目标输入框能否接受换行。窗口标题、程序名**不要传**（隐私） |
 | `parameters.feiyin.device_id` / `device_name` | ✅ | — | §1.4。缺 ⇒ `MissingDeviceInfo` 并断开 |
 | `header.streaming`、`payload.task_group / task / function / model / input` | | — | 服务端忽略，照百炼写即可（方便同一份代码对接百炼） |
 
 **固定内置、不可关**：同音字纠错、去口水词与口吃重复、无效文本判定（只有「嗯啊」之类 ⇒ 终稿为空）。
 
-**声纹**：服务端为每个终端单独累积使用人的声纹，攒够后自动剔除别人的声音（如旁边的人说话、视频声音）。终端被吊销时声纹一并删除。
+**声纹**：服务端为每个终端单独累积使用人的声纹，攒够后自动剔除别人的声音（如旁边的人说话、视频声音）。终端被吊销时声纹一并删除；终端可主动重置（§5.5）。
 
 成功 ⇒ 服务端回 `task-started`（§5.1），**之后**才能发音频。失败 ⇒ `task-failed`（§5.4）；其中 `KeyRevoked` / `KeyExpired` / `InvalidKey` / `DeviceMismatch` / `MissingDeviceInfo` 之后服务端**断开连接**。
 
@@ -218,6 +236,14 @@ Authorization: Bearer <key>
 > 阿里客户端只认 `output.sentence` 的终端可直接用；`output.feiyin` 是扩展字段，可忽略。
 > 终稿可能是**空文本**（没听到有效语音 / 只有口水词）。
 
+**终稿额外字段**（只在 `sentence_end = true` 的那条，都在 `output.feiyin` 下；为空时**不出现**）：
+
+| 字段 | 语义 |
+| --- | --- |
+| `wordbook_hits` | 字符串数组：`vocabulary` 里出现在终稿中的词（去重、按 `vocabulary` 顺序）。终端可据此记词库命中次数 |
+| `learn_suggestions` | 字符串数组：输出优化建议加进词库的词（只有输出优化做成时才可能有）。是否加入由终端 / 用户决定 |
+| `optimization_skipped` | 要了输出优化但没做成的原因：`llm_not_configured`（服务端没开或没填大模型）/ `llm_failed`（调用失败或返回空）。此时终稿是不经大模型的结果，可提示用户 |
+
 ### 5.3 译文（只在终稿、且 `translation_enabled = true` 时）
 
 终稿的 `payload.output` 里多一个（阿里 Gummy 同形）：
@@ -227,17 +253,17 @@ Authorization: Bearer <key>
 ```
 
 - `lang`：`en` 或 `zh`。译文不带逐词时间。
-- 引擎由服务端决定（服务端配了大模型用大模型，否则用离线翻译模型；首次离线翻译要加载模型，可能多等几秒）。
+- 引擎跟输出优化开关（§4.1）：开了 ⇒ 大模型；没开 ⇒ 离线翻译模型（首次要加载模型，可能多等几秒）。
 - 翻译失败 ⇒ **没有** `translations` 键，原文照常。
 
 ### 5.4 `task-finished` / `task-failed`
 
 ```json
 { "header": { "task_id": "8c1f…", "event": "task-finished", "attributes": {} },
-  "payload": { "output": {}, "usage": { "duration": 5 } } }
+  "payload": { "output": {}, "usage": { "duration": 5, "speech_ms": 4448 } } }
 ```
 
-`usage.duration` = 本段音频秒数（向上取整）。之后可在同一连接发下一个 `run-task`。
+`usage.duration` = 本段音频秒数（向上取整）；`usage.speech_ms` = 去掉静音后的有效语音毫秒数（服务端语音检测不可用时等于整段长度），终端可直接用于用量统计。之后可在同一连接发下一个 `run-task`。
 
 ```json
 { "header": { "task_id": "8c1f…", "event": "task-failed", "error_code": "ServiceBusy", "error_message": "capacity", "attributes": {} },
@@ -252,10 +278,24 @@ Authorization: Bearer <key>
 | `InvalidKey` / `KeyExpired` / `KeyRevoked` / `DeviceMismatch` | 见 §1.3 | **断开** | 需要重新配对 |
 | `ServicePaused` | 服务端暂停接入 | 保持 | 对方已暂停，稍后再试 |
 | `ServiceBusy` | 服务端推理通道已满 | 保持 | 对方正忙，稍后再试 |
-| `ModelNotReady` | 服务端电脑没切到「本地流式实时」识别模型 | 保持 | 对方识别模型未就绪 |
+| `ModelNotReady` | 服务端识别模型还没加载完 / 引擎不在线 | 保持 | 对方识别模型未就绪，稍后再试（可先查 §5.5 `/v1/status`） |
+| `EngineRestarted` | 进行中的识别遇到服务端引擎崩溃（约 5 秒后自动拉起） | 保持 | 识别中断，请重说 |
 | `InternalError` | 其它 | 保持 | 识别失败，可重试 |
 
 进行中的识别遇到撤销：先收到 `task-failed`（`KeyRevoked`）再断开。
+
+### 5.5 HTTP 接口（与 WebSocket 同一端口、同一 TLS）
+
+同样**先钉扎指纹再发 key**（§2.2）；鉴权失败与 WebSocket 一样计入 IP 锁定。返回 `Content-Type: application/json`、`Connection: close`。
+
+| 请求 | 作用 | 成功返回 |
+| --- | --- | --- |
+| `GET /v1/status` + `Authorization: Bearer <key>` | 服务状态，终端据此决定能否开始识别 | `200` `{"service":"flashasr","version":"0.1.0","protocol":1,"engine_online":true,"local_realtime_ready":true,"llm_configured":false,"paused":false}` |
+| `POST /v1/profile/voiceprint/reset` + `Authorization: Bearer <key>`（无正文） | 清空**本终端自己**的声纹，之后从零重新累积（终端由 key 确定，不收其它参数） | `200` `{"reset":true}` |
+
+- `engine_online = false` ⇒ `local_realtime_ready` / `llm_configured` 恒为 `false`。
+- `llm_configured` = 服务端开了大模型且填了地址和 key（输出优化可用）。
+- 没带 key / key 无效 ⇒ `401`。路径或方法不对 ⇒ 当作 WebSocket 升级处理（会失败）。
 
 ---
 
@@ -289,7 +329,7 @@ Authorization: Bearer <key>
 | 音频格式 | pcm / opus / wav… 多采样率 | 一期只 pcm 16k |
 | 句子 | 多句，每句一个 `sentence_id` | 一期整段一句，`text` 为全文 |
 | 心跳 | `heartbeat` 参数 | 一期没有；用 WebSocket Ping 保活（§3） |
-| 扩展 | — | `output.feiyin.tentative / ts_source` |
+| 扩展 | — | `output.feiyin.tentative / ts_source`；终稿 `wordbook_hits / learn_suggestions / optimization_skipped`；`usage.speech_ms`；HTTP `/v1/status`、声纹重置 |
 
 ## 8. 二期预告（未实现，终端不要依赖）
 

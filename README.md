@@ -12,16 +12,17 @@
 
 | 程序 | 作用 |
 | --- | --- |
-| `flashasr-core` | 内核（无界面）：加载模型、识别会话、文字处理、拉起网关 |
-| `flashasr-gateway` | 网关：对外 WebSocket（TLS + 证书指纹钉扎）、终端鉴权与配对；不加载模型 |
+| `flashasr` | 前台（常驻、单实例）：对外 WebSocket + HTTP 接口（TLS 1.3 + 证书指纹钉扎）、终端鉴权与配对、本机自动配对；拉起并看护引擎（崩溃 5 秒后重拉）；不加载模型 |
+| `flashasr-engine` | 引擎（由前台拉起，不单独运行）：加载模型、识别会话、文字处理；前台退出即退出 |
 
 ## 协议
 
-终端接入协议见 `docs/ASR-PROTOCOL.md`（与阿里百炼 `run-task` 同格式）。参考客户端：`tools/asr-client/feiyin_asr_client.py`。
+终端接入协议见 `docs/ASR-PROTOCOL.md`（与阿里百炼 `run-task` 同格式）；另有 `GET /v1/status`、`POST /v1/profile/voiceprint/reset`。
+参考客户端：`tools/asr-client/feiyin_asr_client.py`。同一台电脑上的终端读 `%APPDATA%\flashasr\local-pairing.json`（macOS 在 `~/Library/Application Support/flashasr/`）免配对。
 
 ## 开发
 
-- 编译：`cargo build --bins`；测试：`cargo test --bin flashasr-core` / `cargo test --bin flashasr-gateway`。
+- 编译：`cargo build --bins`；测试：`cargo test --bin flashasr` / `cargo test --bin flashasr-engine`。
 - 运行目录需要：模型目录 `models/`、运行库 DLL（sherpa-onnx / onnxruntime / llama.cpp / CTranslate2 / VC++）、规则文件 `*-rules.toml`。
 - 无界面配对：服务运行时执行 `flashasr --add-terminal`，打印连接码。
 - **提交 / 推送前的隐私泄露检测（必装，每个 clone 一次）**：`git config core.hooksPath scripts/git-hooks`。
