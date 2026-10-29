@@ -24,8 +24,8 @@
 | 单号 | 子项 | 状态 |
 | --- | --- | --- |
 | FLASH-P2-01 | 进程结构反转：前台 `flashasr`（原网关，常驻、单实例）拉起并看护引擎 `flashasr-engine`（原内核）；引擎先开 IPC 再后台加载模型，前台一断（标准输入 EOF）即退；引擎崩溃 ⇒ 前台 5s 内重启重连，进行中的会话回 `task-failed EngineRestarted`；端口 / 总开关改动前台进程内跟上；`--add-terminal` 移到前台 | ⬜ |
-| FLASH-P2-02 | 引擎选择 + 按需加载：`run-task` `payload.model` = `local-realtime`（缺省）/ `fun-asr-realtime`；设置里开哪些引擎，本地实时只在开了时才加载模型；没开 ⇒ `EngineUnavailable` | ⬜ |
-| FLASH-P2-03 | 在线 FunASR 转发：引擎用服务端统一的阿里 Key 连 FunASR Realtime，预览 / 终稿 / 逐字时间转成同一协议输出，终稿过同一套文字处理 | ⬜ |
+| FLASH-P2-02 | 删在线 FunASR：`AsrModel` 只剩本地实时（不做中转，Gavin 10-29：「我们自己后端的 FlashASR 就不保留直连 FunASR 的能力了，不做这个中转了，只做我们本地实时语音识别服务。」）；`run-task` `model` 忽略 | ⬜ |
+| ~~FLASH-P2-03~~ | ~~在线 FunASR 转发~~ —— **取消**（同上） | — |
 | FLASH-P2-04 | `GET /v1/status`：协议版本、已开引擎、本地实时是否加载完、剩余路数、是否配了大模型 | ⬜ |
 | FLASH-P2-05 | 协议扩展：`feiyin.scene`（场景给输出优化）、`usage.speech_ms`、终稿 `wordbook_hits` / `learn_suggestions`、未配大模型时的提示字段、`POST /v1/profile/voiceprint/reset` | ⬜ |
 | FLASH-P2-06 | 本机自动配对：首次运行自动建「本机」终端，配对信息写到当前用户目录（只本人可读），供输入法自动发现 | ⬜ |
@@ -33,7 +33,7 @@
 
 ## ⏳ 后续（方案 §8）
 
-- P2 flashasr 独立可用：前台 / 引擎双进程、FunASR 转发、`/v1/status`、管理界面、本机配对文件、安装包。
+- P2 flashasr 独立可用：前台 / 引擎双进程、`/v1/status`、管理界面、本机配对文件、安装包。
 - P3 输入法变薄。**⚠️ 输入法保留直连阿里 FunASR**（Gavin 10-29 最终定：「剥离出的前端输入法要保留直连阿里 FunASR 服务的能力。也就是说，前端输入法既可以直连阿里的 FunASR 服务，也可以连接我们自己部署的 FlashASR 服务。先记下来，后面改前端语音输入法的时候再实施。」）：直连 + 连 flashasr 两条路并存，直连模式下哪些处理环节可用随 P3 方案定。P4 发版。
 - FLASH-P1 遗留：连接码前缀仍是 `feiyin-asr://`（输入法客户端按此解析；P3 定是否改名）；单实例保护（两个内核会抢端口 / 管道）P2 做。
 - 公开仓库首次推送代码前：把引用 voice-ime 的预编译库 / 补丁改为本仓库自带或下载脚本（公开仓库不能依赖兄弟目录）。
