@@ -24,6 +24,8 @@ mod ctl;
 mod local_pair;
 mod status;
 mod tls;
+#[cfg(target_os = "windows")]
+mod tray;
 mod ws;
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -148,6 +150,8 @@ fn watch_settings(start: (bool, u16)) {
                 log::error!("[flashasr] 自重启失败：{e}；保持当前状态");
                 continue;
             }
+            #[cfg(target_os = "windows")]
+            tray::shutdown();
             std::process::exit(0);
         });
     if let Err(e) = spawn {
@@ -174,6 +178,9 @@ fn main() {
     ensure_service_enabled_by_default();
     let settings = ServiceSettings::load();
     watch_settings((settings.enabled, settings.port));
+    // FLASH-P2b-02：托盘在总开关关着时也要在（否则用户没有入口打开管理界面）；服务起来后再挂上状态。
+    #[cfg(target_os = "windows")]
+    tray::start();
     if !settings.enabled {
         log::info!("[flashasr] 总开关关着：不拉起引擎、不监听，等开关打开");
         loop {
@@ -195,6 +202,8 @@ fn run(settings: ServiceSettings) -> std::io::Result<()> {
     // FLASH-P2-06：本机输入法自动发现用的配对文件。
     local_pair::ensure(&shared, settings.port);
     ctl::start(shared.clone())?;
+    #[cfg(target_os = "windows")]
+    let _ = tray::SHARED.set(shared.clone());
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

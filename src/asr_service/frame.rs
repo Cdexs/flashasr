@@ -33,6 +33,8 @@ pub(crate) enum Kind {
     Logout = 0x07,
     /// FLASH-P2-05：网关 → 内核：重置某终端的声纹（内容 = 终端编号 UTF-8；会话号 0）。
     ResetVoiceprint = 0x08,
+    /// FLASH-P2b-01：前台 → 引擎：重读 `config.toml`（管理界面改了大模型配置等；无内容，会话号 0）。
+    ReloadConfig = 0x09,
     Result = 0x81,
     End = 0x82,
 }
@@ -48,6 +50,7 @@ impl Kind {
             0x06 => Self::Login,
             0x07 => Self::Logout,
             0x08 => Self::ResetVoiceprint,
+            0x09 => Self::ReloadConfig,
             0x81 => Self::Result,
             0x82 => Self::End,
             _ => return None,

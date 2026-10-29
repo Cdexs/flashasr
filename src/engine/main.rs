@@ -98,23 +98,55 @@ const ENDPOINT_PREFIX: &str = "FLASHASR_ENDPOINT ";
 /// FLASH-P2-04：引擎状态行（标准输出，JSON），前台据此回 `/v1/status`。
 const STATUS_PREFIX: &str = "FLASHASR_STATUS ";
 
-/// 向前台报一次状态：本地实时模型是否加载完、服务端是否开了大模型（输出优化 / 大模型翻译可用）。
-fn report_status(local_realtime: bool, llm: bool) {
+/// FLASH-P2b-01：本地实时模型加载结果 `(已加载, 失败原因)`（重载配置后重报状态要带上它）。
+static LOCAL_STATE: Mutex<(bool, String)> = Mutex::new((false, String::new()));
+
+/// 「配了大模型」= 开关开且地址、密钥都填了（缺省配置开关是开的但没填，不能算可用）。
+fn llm_configured(config: &AppConfig) -> bool {
+    config.llm.enabled
+        && !config.llm.api_url.trim().is_empty()
+        && !config.llm.api_key.trim().is_empty()
+}
+
+/// 向前台报一次状态：本地实时模型是否加载完（失败则带原因）、服务端是否配好大模型（输出优化 / 大模型翻译可用）。
+fn report_status(llm: bool) {
     use std::io::Write;
-    let line = serde_json::json!({ "local_realtime": local_realtime, "llm": llm });
+    let (local_realtime, load_error) = LOCAL_STATE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    let line = serde_json::json!({
+        "local_realtime": local_realtime,
+        "llm": llm,
+        "load_error": load_error,
+    });
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "{STATUS_PREFIX}{line}").and_then(|_| out.flush());
+}
+
+fn set_local_state(loaded: bool, error: String) {
+    *LOCAL_STATE.lock().unwrap_or_else(|p| p.into_inner()) = (loaded, error);
+}
+
+/// FLASH-P2b-01：管理界面改了 `config.toml`（大模型统一配置等）⇒ 重读并替换运行时配置。
+/// 新会话立即用新配置；进行中的会话用的是开始时的副本，不受影响。读失败 ⇒ 保持原配置。
+pub(crate) fn reload_config(runtime_config: &Arc<RwLock<AppConfig>>) {
+    match AppConfig::load() {
+        Ok(c) => {
+            let llm = llm_configured(&c);
+            *runtime_config.write().unwrap_or_else(|p| p.into_inner()) = c;
+            log::info!("[flashasr] config reloaded (llm configured: {llm})");
+            report_status(llm);
+        }
+        Err(e) => log::warn!("[flashasr] config reload failed, keeping current: {e:#}"),
+    }
 }
 
 /// 加载本地实时双模型 + 对齐器（构造成功即登记给远程会话：`transcription::REMOTE_ENGINES`），然后常驻。
 /// 不预先注入词库：词库每个终端单独，随每段识别的 `vocabulary` 带来（FLASH-P0-509）。
 /// `Transcriber` 释放时注销登记 ⇒ 本线程持有它直到进程结束。加载失败 ⇒ 记日志，会话回 `not_ready`。
 fn load_local_realtime(config: AppConfig) {
-    // 「配了大模型」= 开关开且地址、密钥都填了（缺省配置开关是开的但没填，不能算可用）。
-    let llm = config.llm.enabled
-        && !config.llm.api_url.trim().is_empty()
-        && !config.llm.api_key.trim().is_empty();
-    report_status(false, llm);
+    report_status(llm_configured(&config));
     let model_dir = transcription::model_dir();
     let t0 = std::time::Instant::now();
     let engines = transcription::Transcriber::new(
@@ -136,7 +168,8 @@ fn load_local_realtime(config: AppConfig) {
                 t0.elapsed().as_secs_f32(),
                 model_dir.display()
             );
-            report_status(true, llm);
+            set_local_state(true, String::new());
+            report_status(llm_configured(&config));
             t
         }
         Err(e) => {
@@ -144,6 +177,8 @@ fn load_local_realtime(config: AppConfig) {
                 "[flashasr] local realtime engines failed to load from {}: {e:#}",
                 model_dir.display()
             );
+            set_local_state(false, format!("{e:#}"));
+            report_status(llm_configured(&config));
             return;
         }
     };

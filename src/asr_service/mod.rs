@@ -228,6 +228,8 @@ fn serve_conn(conn: transport::Conn, runtime_config: &Arc<RwLock<AppConfig>>) {
                     Err(e) => log::warn!("[flashasr] voiceprint reset for {id} failed: {e}"),
                 }
             }
+            // FLASH-P2b-01：管理界面改了配置 ⇒ 热重载（不打断进行中的识别）。
+            Kind::ReloadConfig => crate::reload_config(runtime_config),
             Kind::Hello | Kind::Result | Kind::End => {
                 log::warn!("[ASR-SERVER-491] unexpected frame {:?}", f.kind);
             }

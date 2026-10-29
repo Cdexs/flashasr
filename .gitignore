@@ -5,3 +5,6 @@ node_modules/
 /Publish/
 CLAUDE.md
 *.log
+/ui/dist/
+/src-tauri/target/
+/src-tauri/gen/

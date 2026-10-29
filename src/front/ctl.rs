@@ -63,5 +63,26 @@ fn handle(shared: &Shared, req: Request) -> Response {
                 Response::err("no such terminal")
             }
         }
+        Request::Terminals => Response {
+            terminals: Some(shared.terminals()),
+            ..Default::default()
+        },
+        Request::ResetVoiceprint { terminal_id } => {
+            if shared
+                .terminals()
+                .iter()
+                .any(|t| t.terminal_id == terminal_id)
+            {
+                shared.reset_voiceprint(&terminal_id);
+                log::info!("[flashasr] 管理界面重置了终端 {terminal_id} 的声纹");
+                Response::default()
+            } else {
+                Response::err("no such terminal")
+            }
+        }
+        Request::ReloadConfig => {
+            shared.reload_config();
+            Response::default()
+        }
     }
 }

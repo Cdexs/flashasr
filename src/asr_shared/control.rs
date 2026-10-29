@@ -27,6 +27,14 @@ pub enum Request {
     Revoke {
         terminal_id: String,
     },
+    /// FLASH-P2b-01：终端列表（未撤销的，带在线状态）。
+    Terminals,
+    /// FLASH-P2b-01：管理界面重置某终端的声纹（之后从零重新累积）。
+    ResetVoiceprint {
+        terminal_id: String,
+    },
+    /// FLASH-P2b-01：管理界面改了 `config.toml`（大模型统一配置等）⇒ 引擎热重载，不打断进行中的识别。
+    ReloadConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -46,6 +54,33 @@ pub struct Status {
     pub fingerprint: String,
     /// 在线终端（同一终端多条连接只算一条，取最早登录）。
     pub online: Vec<Online>,
+    /// FLASH-P2b-01：引擎在线、本地实时模型就绪、大模型已配好（开关开且地址与 key 都填了）。
+    pub engine_online: bool,
+    pub local_realtime_ready: bool,
+    pub llm_configured: bool,
+    /// FLASH-P2b-01：本地实时模型加载失败的原因（空 = 没失败）。
+    pub load_error: String,
+}
+
+/// FLASH-P2b-01：终端列表一行（不含 key —— 终端表里也只有 key 的哈希）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TerminalRow {
+    pub terminal_id: String,
+    /// 终端自报的名字（还没连过 ⇒ 空）。
+    pub device_name: String,
+    /// 已绑定设备（连过一次）。
+    pub bound: bool,
+    /// 本机终端（flashasr 自动建，供本机输入法）。
+    pub local: bool,
+    pub created_ts: i64,
+    pub last_login_ts: i64,
+    pub last_logout_ts: i64,
+    /// 最近一次接入方式：`lan` / `wan`。
+    pub last_net: String,
+    pub online: bool,
+    /// 服务端存有该终端的声纹。
+    pub has_voiceprint: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,6 +104,7 @@ pub struct Response {
     pub error: String,
     pub status: Option<Status>,
     pub added: Option<Added>,
+    pub terminals: Option<Vec<TerminalRow>>,
 }
 
 impl Response {
@@ -171,6 +207,17 @@ mod tests {
         );
         let r: Request = serde_json::from_str(r#"{"cmd":"add_terminal"}"#).unwrap();
         assert_eq!(r, Request::AddTerminal);
+        assert_eq!(
+            serde_json::to_string(&Request::ResetVoiceprint {
+                terminal_id: "ab".into()
+            })
+            .unwrap(),
+            r#"{"cmd":"reset_voiceprint","terminal_id":"ab"}"#
+        );
+        let r: Request = serde_json::from_str(r#"{"cmd":"reload_config"}"#).unwrap();
+        assert_eq!(r, Request::ReloadConfig);
+        let r: Request = serde_json::from_str(r#"{"cmd":"terminals"}"#).unwrap();
+        assert_eq!(r, Request::Terminals);
     }
 
     #[test]

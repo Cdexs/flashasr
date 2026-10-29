@@ -43,6 +43,9 @@ pub struct EngineStatus {
     /// 服务端开了大模型（输出优化 / 大模型翻译可用）。
     #[serde(default)]
     pub llm: bool,
+    /// FLASH-P2b-01：本地实时模型加载失败的原因（空 = 没失败：加载中或已加载）。
+    #[serde(default)]
+    pub load_error: String,
 }
 /// 引擎掉线时进行中会话的错误码（`ws.rs` `end_code` 映射为 `EngineRestarted`）。
 pub const ERR_ENGINE_RESTARTED: &str = "engine_restarted";
@@ -378,7 +381,18 @@ mod tests {
             parse_status(r#"FLASHASR_STATUS {"local_realtime":true,"llm":false}"#),
             Some(EngineStatus {
                 local_realtime: true,
-                llm: false
+                llm: false,
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            parse_status(
+                r#"FLASHASR_STATUS {"local_realtime":false,"llm":true,"load_error":"no model"}"#
+            ),
+            Some(EngineStatus {
+                local_realtime: false,
+                llm: true,
+                load_error: "no model".into()
             })
         );
         assert_eq!(

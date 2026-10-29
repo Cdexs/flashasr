@@ -26,7 +26,7 @@ use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::asr_shared::control::{Added, Online, Status};
+use crate::asr_shared::control::{Added, Online, Status, TerminalRow};
 use crate::asr_shared::now_ts;
 use crate::asr_shared::pairing::{pair_uri, AuthError, TerminalStore};
 use crate::asr_shared::settings::ServiceSettings;
@@ -146,11 +146,71 @@ impl Shared {
         }
         let mut online: Vec<Online> = by_id.into_values().collect();
         online.sort_by_key(|o| o.login_ts);
+        let engine_online = self.core.engine_up();
+        let st = self.core.engine_status();
         Status {
             paused: self.paused(),
             port: self.port,
             fingerprint: self.fingerprint.clone(),
             online,
+            engine_online,
+            local_realtime_ready: engine_online && st.local_realtime,
+            llm_configured: engine_online && st.llm,
+            load_error: st.load_error,
+        }
+    }
+
+    /// FLASH-P2b-01：终端列表（未撤销的；本机终端排最前，其余按添加时间）。
+    pub fn terminals(&self) -> Vec<TerminalRow> {
+        let online: std::collections::HashSet<String> = lock(&self.online)
+            .values()
+            .map(|c| c.terminal_id.clone())
+            .collect();
+        let st = {
+            let _g = lock(&self.store);
+            TerminalStore::load()
+        };
+        let mut rows: Vec<TerminalRow> = st
+            .terminals
+            .iter()
+            .filter(|t| !t.revoked)
+            .map(|t| TerminalRow {
+                terminal_id: t.id.clone(),
+                device_name: t.device_name.clone(),
+                bound: t.bound(),
+                local: t.local,
+                created_ts: t.created_ts,
+                last_login_ts: t.last_login_ts,
+                last_logout_ts: t.last_logout_ts,
+                last_net: t.last_net.clone(),
+                online: online.contains(&t.id),
+                has_voiceprint: crate::asr_shared::terminal_voiceprint_path(&t.id)
+                    .is_some_and(|p| p.exists()),
+            })
+            .collect();
+        rows.sort_by_key(|r| (!r.local, r.created_ts));
+        rows
+    }
+
+    /// FLASH-P2-05 / P2b-01：重置某终端的声纹（终端自己经 HTTP、管理界面经控制通道，同一做法）。
+    /// 引擎在线 ⇒ 交给引擎（它要丢内存那份再删档）；不在线 ⇒ 直接删档（引擎重启后从文件读，自然为空）。
+    pub fn reset_voiceprint(&self, terminal_id: &str) {
+        if self.core.engine_up() {
+            self.core.send(Frame::new(
+                Kind::ResetVoiceprint,
+                0,
+                terminal_id.as_bytes().to_vec(),
+            ));
+        } else if let Err(e) = crate::asr_shared::purge_terminal_voiceprint(terminal_id) {
+            log::warn!("[flashasr] 删除终端 {terminal_id} 声纹失败：{e}");
+        }
+    }
+
+    /// FLASH-P2b-01：让引擎重读 `config.toml`。引擎不在线 ⇒ 不用做（它下次启动本来就读最新的）。
+    pub fn reload_config(&self) {
+        if self.core.engine_up() {
+            self.core
+                .send(Frame::new(Kind::ReloadConfig, 0, Vec::new()));
         }
     }
 
@@ -439,16 +499,7 @@ async fn answer_api(
                 )
             }
             status::Api::VoiceprintReset => {
-                // 引擎在线 ⇒ 交给引擎（它要丢内存那份再删档）；不在线 ⇒ 直接删档（引擎重启后从文件读，自然为空）。
-                if shared.core.engine_up() {
-                    shared.core.send(Frame::new(
-                        Kind::ResetVoiceprint,
-                        0,
-                        terminal_id.as_bytes().to_vec(),
-                    ));
-                } else if let Err(e) = crate::asr_shared::purge_terminal_voiceprint(&terminal_id) {
-                    log::warn!("[flashasr] 删除终端 {terminal_id} 声纹失败：{e}");
-                }
+                shared.reset_voiceprint(&terminal_id);
                 status::http_response(200, "OK", &json!({ "reset": true }))
             }
         }

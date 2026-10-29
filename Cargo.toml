@@ -56,6 +56,8 @@ chrono = "0.4"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 ctranslate2-sys = { version = "0.1.5", features = ["dnnl", "openmp-runtime-comp"] }
+# FLASH-P2b-02：前台托盘（版本同 voice-ime）。
+tray-icon = "0.19"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_Memory",
@@ -70,6 +72,8 @@ windows = { version = "0.58", features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Globalization",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
