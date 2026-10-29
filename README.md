@@ -14,6 +14,7 @@
 | --- | --- |
 | `flashasr` | 前台（常驻、单实例）：对外 WebSocket + HTTP 接口（TLS 1.3 + 证书指纹钉扎）、终端鉴权与配对、本机自动配对；拉起并看护引擎（崩溃 5 秒后重拉）；不加载模型 |
 | `flashasr-engine` | 引擎（由前台拉起，不单独运行）：加载模型、识别会话、文字处理；前台退出即退出 |
+| `flashasr-ui` | 管理界面（Tauri，`src-tauri/` + `ui/`；托盘「打开管理界面」拉起，单实例）：服务启停 / 暂停、接入地址、终端添加 / 撤销 / 重置声纹 / 用量、输出优化大模型统一配置 |
 
 ## 协议
 
@@ -23,6 +24,8 @@
 ## 开发
 
 - 编译：`cargo build --bins`；测试：`cargo test --bin flashasr` / `cargo test --bin flashasr-engine`。
+- 管理界面：`cd ui && npm ci && npm run build`，再 `cd src-tauri && cargo build --features custom-protocol`；把 `flashasr-ui.exe` 放到 `flashasr.exe` 旁边（界面的数据目录 = 程序所在目录）。
+- 安装包：`installer/flashasr.iss`（Inno Setup 6；从 `Publish/` 取产物；只按用户安装）。
 - 运行目录需要：模型目录 `models/`、运行库 DLL（sherpa-onnx / onnxruntime / llama.cpp / CTranslate2 / VC++）、规则文件 `*-rules.toml`。
 - 无界面配对：服务运行时执行 `flashasr --add-terminal`，打印连接码。
 - **提交 / 推送前的隐私泄露检测（必装，每个 clone 一次）**：`git config core.hooksPath scripts/git-hooks`。

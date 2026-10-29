@@ -1,0 +1,44 @@
+{
+  "build": {
+    "beforeDevCommand": "cd ui && npm run dev",
+    "beforeBuildCommand": "cd ui && npm run build",
+    "devUrl": "http://localhost:1421",
+    "frontendDist": "../ui/dist"
+  },
+  "productName": "flashasr",
+  "version": "0.1.0",
+  "identifier": "com.flashasr.manager",
+  "app": {
+    "withGlobalTauri": true,
+    "security": {
+      "csp": null,
+      "capabilities": ["default"]
+    },
+    "windows": [
+      {
+        "label": "main",
+        "fullscreen": false,
+        "resizable": false,
+        "maximizable": false,
+        "shadow": true,
+        "decorations": true,
+        "transparent": false,
+        "title": "flashasr",
+        "width": 1080,
+        "height": 720,
+        "center": true,
+        "useHttpsScheme": true
+      }
+    ]
+  },
+  "bundle": {
+    "active": false,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
