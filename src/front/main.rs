@@ -21,6 +21,7 @@ mod transport;
 
 mod core_link;
 mod ctl;
+mod status;
 mod tls;
 mod ws;
 

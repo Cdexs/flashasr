@@ -32,6 +32,7 @@ use crate::asr_shared::pairing::{pair_uri, AuthError, TerminalStore};
 use crate::asr_shared::settings::ServiceSettings;
 use crate::core_link::CoreLink;
 use crate::frame::{EndPayload, Frame, Kind, OpenParams, ResultPayload, MAX_FRAME};
+use crate::status;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -289,7 +290,14 @@ pub async fn serve_conn(
     let _ = tcp.set_nodelay(true);
     let mut key = None;
     let hs = async {
-        let tls = acceptor.accept(tcp).await.ok()?;
+        let mut tls = acceptor.accept(tcp).await.ok()?;
+        // FLASH-P2-04：先读请求头；`GET /v1/status` 就地回答，其余字节倒回给 WebSocket 握手。
+        let head = status::read_head(&mut tls).await.ok()?;
+        if let Some(key) = status::status_request(&head) {
+            answer_status(&shared, ip, key, &mut tls).await;
+            return None;
+        }
+        let tls = status::Rewind::new(head, tls);
         let cfg = WebSocketConfig::default()
             .max_message_size(Some(MAX_FRAME))
             .max_frame_size(Some(MAX_FRAME));
@@ -365,7 +373,44 @@ struct Conn {
     task: Option<Task>,
 }
 
-type Ws = tokio_tungstenite::WebSocketStream<tokio_rustls::server::TlsStream<TcpStream>>;
+type Ws =
+    tokio_tungstenite::WebSocketStream<status::Rewind<tokio_rustls::server::TlsStream<TcpStream>>>;
+
+/// FLASH-P2-04：回 `/v1/status`。要带有效终端 key（与识别同一把，失败计入锁定）；暂停中照常回（带 `paused`）。
+async fn answer_status(
+    shared: &Shared,
+    ip: IpAddr,
+    key: Option<String>,
+    tls: &mut tokio_rustls::server::TlsStream<TcpStream>,
+) {
+    use tokio::io::AsyncWriteExt;
+    let ok = key.is_some_and(|k| {
+        let _g = lock(&shared.store);
+        TerminalStore::load().check_key(&k, now_ts()).is_ok()
+    });
+    let resp = if ok {
+        let st = shared.core.engine_status();
+        status::http_response(
+            200,
+            "OK",
+            &status::status_body(
+                shared.core.engine_up(),
+                st.local_realtime,
+                st.llm,
+                shared.paused(),
+            ),
+        )
+    } else {
+        shared.fail(ip);
+        status::http_response(
+            401,
+            "Unauthorized",
+            &json!({ "error": AuthError::InvalidKey.code() }),
+        )
+    };
+    let _ = tls.write_all(&resp).await;
+    let _ = tls.shutdown().await;
+}
 
 /// 发给客户端的事件（百炼格式：`header.event` + `payload`）。
 fn event(task_id: &str, name: &str, payload: Value) -> Message {

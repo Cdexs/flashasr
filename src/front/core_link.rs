@@ -31,6 +31,19 @@ const ENGINE_EXE: &str = "flashasr-engine";
 /// 与引擎约定（见 `src/engine/main.rs`）：口令环境变量、标准输出第一行的端点前缀。
 const TOKEN_ENV: &str = "FLASHASR_TOKEN";
 const ENDPOINT_PREFIX: &str = "FLASHASR_ENDPOINT ";
+/// FLASH-P2-04：引擎状态行前缀（之后每行一个 JSON，见引擎 `report_status`）。
+const STATUS_PREFIX: &str = "FLASHASR_STATUS ";
+
+/// FLASH-P2-04：引擎报上来的状态（引擎不在线 ⇒ 全默认）。
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+pub struct EngineStatus {
+    /// 本地实时模型已加载完、可识别。
+    #[serde(default)]
+    pub local_realtime: bool,
+    /// 服务端开了大模型（输出优化 / 大模型翻译可用）。
+    #[serde(default)]
+    pub llm: bool,
+}
 /// 引擎掉线时进行中会话的错误码（`ws.rs` `end_code` 映射为 `EngineRestarted`）。
 pub const ERR_ENGINE_RESTARTED: &str = "engine_restarted";
 /// 引擎不在线时新会话的错误码（同引擎回的「模型未就绪」）。
@@ -42,6 +55,7 @@ struct Inner {
     /// 发往引擎的写队列；`None` = 引擎不在线。
     tx: Mutex<Option<mpsc::Sender<Frame>>>,
     routes: Routes,
+    status: Mutex<EngineStatus>,
 }
 
 pub struct CoreLink {
@@ -59,6 +73,7 @@ impl CoreLink {
         let inner = Arc::new(Inner {
             tx: Mutex::new(None),
             routes: Arc::default(),
+            status: Mutex::default(),
         });
         let i2 = inner.clone();
         std::thread::Builder::new()
@@ -85,6 +100,11 @@ impl CoreLink {
     /// 引擎此刻是否在线（`/v1/status` 用）。
     pub fn engine_up(&self) -> bool {
         lock(&self.inner.tx).is_some()
+    }
+
+    /// 引擎最近一次报的状态（不在线 ⇒ 全默认）。
+    pub fn engine_status(&self) -> EngineStatus {
+        lock(&self.inner.status).clone()
     }
 
     pub fn open(&self, params: &OpenParams) -> (u64, UnboundedReceiver<Frame>) {
@@ -159,8 +179,9 @@ fn run_engine_once(exe: &PathBuf, inner: &Arc<Inner>) -> io::Result<()> {
     let mut child = cmd.spawn()?;
     log::info!("[flashasr] 引擎已拉起（pid {}）", child.id());
     let r = serve_engine(&mut child, &token, inner);
-    // 不在线了：先撤写队列，再结束子进程（它若还活着，标准输入随 Child 一起关闭也会让它退出）。
+    // 不在线了：先撤写队列、清状态，再结束子进程（它若还活着，标准输入随 Child 一起关闭也会让它退出）。
     *lock(&inner.tx) = None;
+    *lock(&inner.status) = EngineStatus::default();
     let _ = child.kill();
     let _ = child.wait();
     r
@@ -197,10 +218,22 @@ fn serve_engine(child: &mut Child, token: &str, inner: &Arc<Inner>) -> io::Resul
         })?;
     *lock(&inner.tx) = Some(tx);
     log::info!("[flashasr] 已连上引擎（{endpoint}）");
-    // 读到断开为止；`lines` 留到这里（引擎不再写标准输出，留着免得它写时出错）。
-    let r = read_loop(reader, &inner.routes);
-    drop(lines);
-    r
+    // FLASH-P2-04：之后的标准输出是状态行；读到引擎退出（EOF）为止。
+    let i2 = inner.clone();
+    std::thread::Builder::new()
+        .name("engine-status".into())
+        .spawn(move || {
+            for line in lines.lines().map_while(Result::ok) {
+                if let Some(st) = parse_status(&line) {
+                    *lock(&i2.status) = st;
+                }
+            }
+        })?;
+    read_loop(reader, &inner.routes)
+}
+
+fn parse_status(line: &str) -> Option<EngineStatus> {
+    serde_json::from_str(line.trim().strip_prefix(STATUS_PREFIX)?).ok()
 }
 
 fn read_loop(mut reader: Box<dyn Read + Send>, routes: &Routes) -> io::Result<()> {
@@ -300,6 +333,7 @@ mod tests {
             inner: Arc::new(Inner {
                 tx: Mutex::new(None),
                 routes: Arc::default(),
+                status: Mutex::default(),
             }),
             next: AtomicU64::new(1),
         };
@@ -319,6 +353,7 @@ mod tests {
         let inner = Inner {
             tx: Mutex::new(None),
             routes: Arc::default(),
+            status: Mutex::default(),
         };
         let mut rxs = Vec::new();
         for sid in 1..=3u64 {
@@ -334,5 +369,23 @@ mod tests {
             assert_eq!(end.error, ERR_ENGINE_RESTARTED);
         }
         assert!(lock(&inner.routes).is_empty());
+    }
+
+    /// FLASH-P2-04：状态行解析；不是状态行 / JSON 坏 ⇒ `None`（不覆盖已有状态）。
+    #[test]
+    fn status_line_parsing() {
+        assert_eq!(
+            parse_status(r#"FLASHASR_STATUS {"local_realtime":true,"llm":false}"#),
+            Some(EngineStatus {
+                local_realtime: true,
+                llm: false
+            })
+        );
+        assert_eq!(
+            parse_status("FLASHASR_STATUS {}"),
+            Some(EngineStatus::default())
+        );
+        assert_eq!(parse_status("hello"), None);
+        assert_eq!(parse_status("FLASHASR_STATUS {bad"), None);
     }
 }

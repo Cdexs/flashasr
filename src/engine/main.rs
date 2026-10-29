@@ -95,11 +95,26 @@ fn init_logging(debug: bool) {
 const TOKEN_ENV: &str = "FLASHASR_TOKEN";
 /// 引擎告诉前台 IPC 端点的那一行（标准输出第一行）。
 const ENDPOINT_PREFIX: &str = "FLASHASR_ENDPOINT ";
+/// FLASH-P2-04：引擎状态行（标准输出，JSON），前台据此回 `/v1/status`。
+const STATUS_PREFIX: &str = "FLASHASR_STATUS ";
+
+/// 向前台报一次状态：本地实时模型是否加载完、服务端是否开了大模型（输出优化 / 大模型翻译可用）。
+fn report_status(local_realtime: bool, llm: bool) {
+    use std::io::Write;
+    let line = serde_json::json!({ "local_realtime": local_realtime, "llm": llm });
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{STATUS_PREFIX}{line}").and_then(|_| out.flush());
+}
 
 /// 加载本地实时双模型 + 对齐器（构造成功即登记给远程会话：`transcription::REMOTE_ENGINES`），然后常驻。
 /// 不预先注入词库：词库每个终端单独，随每段识别的 `vocabulary` 带来（FLASH-P0-509）。
 /// `Transcriber` 释放时注销登记 ⇒ 本线程持有它直到进程结束。加载失败 ⇒ 记日志，会话回 `not_ready`。
 fn load_local_realtime(config: AppConfig) {
+    // 「配了大模型」= 开关开且地址、密钥都填了（缺省配置开关是开的但没填，不能算可用）。
+    let llm = config.llm.enabled
+        && !config.llm.api_url.trim().is_empty()
+        && !config.llm.api_key.trim().is_empty();
+    report_status(false, llm);
     let model_dir = transcription::model_dir();
     let t0 = std::time::Instant::now();
     let engines = transcription::Transcriber::new(
@@ -121,6 +136,7 @@ fn load_local_realtime(config: AppConfig) {
                 t0.elapsed().as_secs_f32(),
                 model_dir.display()
             );
+            report_status(true, llm);
             t
         }
         Err(e) => {
