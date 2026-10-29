@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# flashasr 密钥 / 隐私泄露拦截钩子（源自 voice-ime，SECRET-IN-REPO-001 事故后建立，SECRET-082 抽共享模式表）
+#
+# 背景：2026-08-14 f58af96 把 DeepSeek API key 明文提交并 push 到 GitHub，
+# 暴露 20 天后遭第三方盗刷，产生真实金钱损失。当时「不得提交凭证」这条规则
+# 已经写在文档里 —— 规则存在但拦不住，因为它靠人记。本钩子把它变成机器判据：
+# 只要 staged 内容里出现密钥形态，commit 直接失败。
+#
+# 安装（每个 clone 一次）：
+#   git config core.hooksPath scripts/git-hooks
+#
+# 紧急绕过（必须留下痕迹，且只允许误报时使用）：
+#   SECRET_SCAN_SKIP=1 git commit ...
+
+set -u
+
+if [ "${SECRET_SCAN_SKIP:-0}" = "1" ]; then
+  echo "⚠️  [pre-commit] SECRET_SCAN_SKIP=1 —— 密钥扫描已被显式跳过，请确认这是误报。" >&2
+  exit 0
+fi
+
+# 定位共享模式表
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=secret-patterns.sh
+. "$HOOK_DIR/secret-patterns.sh"
+# shellcheck source=secret-paths.sh
+. "$HOOK_DIR/secret-paths.sh"
+
+# ---- SECRET-126 路径闸门（内容扫描之前先跑，命中即拒）----
+# 有些文件「按路径」就判危险（根 config.toml 含真实 api_key、.env 凭证载体、*.log 口述
+# 转写原文等隐私）—— 内容正则拦不住或拦不全（[GATE-MATCHES-SHAPE-NOT-CONTENT-001]）。
+# .gitignore 挡不住 git add -f、也挡不住有人删规则，这里是第二道机器闸门。
+# 🔴 fail-closed（HOOK-FAIL-OPEN-001 同源）：取不到 staged 列表就拒绝放行。
+if ! STAGED=$(git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMR 2>&1); then
+  echo "❌ [pre-commit] 无法取得 staged 文件列表，拒绝放行（fail-closed）。" >&2
+  echo "   git 报错：${STAGED}" >&2
+  echo "   确认无误后可用 SECRET_SCAN_SKIP=1 git commit 显式放行。" >&2
+  exit 1
+fi
+PATH_HITS=$(printf '%s\n' "$STAGED" | scan_paths)
+if [ -n "$PATH_HITS" ]; then
+  cat >&2 <<MSG
+❌ [pre-commit] 拦截：staged 中存在按路径即判危险的文件，commit 已中止（SECRET-126）。
+${PATH_HITS}
+MSG
+  print_path_guidance
+  exit 1
+fi
+
+# 只扫本次 staged 的新增行（-U0 去掉上下文，^+ 取新增），避免历史存量反复报警
+# 🔴 fail-closed（HOOK-FAIL-OPEN-001）：git diff 失败时拒绝放行，不静默放过。
+#   staged diff 取不到基本只发生在空提交，风险比 pre-push 低，但失效形态同源，一并收敛。
+if ! DIFF_RAW=$(hook_diff --cached -U0 --diff-filter=ACM 2>&1); then
+  echo "❌ [pre-commit] 无法取得 staged diff，拒绝放行（fail-closed）。" >&2
+  echo "   git 报错：${DIFF_RAW}" >&2
+  echo "   确认无误后可用 SECRET_SCAN_SKIP=1 git commit 显式放行。" >&2
+  exit 1
+fi
+# SECRET-105：文件头用白名单式排除（b/ 或 /dev/null 或带引号路径），
+# 不再用裸 '^+++' —— 内容行以 ++ 开头（diff 里呈现为 '+++foo' 无空格）会被裸
+# 前缀误排成漏报。hook_diff 已强制标准 a/ b/ 前缀形态，白名单恒可匹配文件头；
+# 白名单失配的失败方向是被扫到的噪音，而非漏报。
+DIFF=$(printf '%s\n' "$DIFF_RAW" | grep -E '^\+' | grep -vE '^\+\+\+ (b/|/dev/null|")')
+[ -z "$DIFF" ] && exit 0
+
+HITS=$(scan_diff "$DIFF")
+if [ -n "$HITS" ]; then
+  cat >&2 <<MSG
+❌ [pre-commit] 拦截：staged 内容里发现疑似密钥/凭证，commit 已中止。
+${HITS}
+MSG
+  print_secret_guidance
+  exit 1
+fi
+
+exit 0
