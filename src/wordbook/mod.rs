@@ -1,0 +1,662 @@
+pub mod cache;
+pub mod db;
+
+use anyhow::Result;
+use std::cell::RefCell;
+use std::sync::OnceLock;
+
+#[allow(unused_imports)]
+pub use cache::{WordbookCache, WordbookEntry, WordbookStats};
+
+/// WORDBOOK-053-C: Maximum character count for a valid wordbook candidate.
+///
+/// 🔴 **30 → 12（Gavin 2026-09-21 拍板）。** 原值 30 是按「拒绝整句（通常 40+ 字）」设的下限思路，
+/// 但**挡不住短语**：无句末标点、无虚词的 25 字跨度今天能原样进用户词库。
+/// 而候选来自 `extract_correction_word` 的字符级 diff —— ASR 尾部听错时公共后缀为空，
+/// 跨度会一路吞到句尾（AUTOLEARN-CANDIDATE-327 的成因），**短语进候选表是真实发生的路径**。
+///
+/// 12 的依据是实际词条形态，不是拍的：中文专名/成语一般 ≤10 字（「飞音输入法」5、
+/// 「五代十国」4、「维生素B12」6），最长的现实参照是英文短语 "Claude Code" = **11 字**。
+/// 取 12 = 覆盖已知最长正例 + 1 字余量。
+///
+/// 🔴 词库是**用户可见资产且参与 ASR 热词偏置**，脏词条进去会长期起作用 ⇒ 宁可少收。
+/// 再放宽前先回答：放进来的多出那几字，是真词条，还是没被 327 收窄干净的短语残留？
+const MAX_CANDIDATE_CHARS: usize = 12;
+
+/// WORDBOOK-MINLEN-242: 候选词最小字符数。单字候选对热词偏置无实效但持续制造噪声，
+/// 一律拒绝。2 是下限而非经验值——中文专名最短即 2 字（飞音/玄戒），
+/// 常用英文缩写最短亦为 2（AI/UI）。
+const MIN_CANDIDATE_CHARS: usize = 2;
+
+/// WORDBOOK-053-C: Maximum number of whitespace-separated segments.
+/// Rationale: English phrases like "Claude Code" (2 segments) or "voice ime" (2)
+/// are legitimate. 4 segments allows rare longer English terms while rejecting
+/// sentence-level text (which typically has many whitespace-separated words).
+const MAX_WHITESPACE_SEGMENTS: usize = 4;
+
+/// WORDBOOK-053-C: Validate a wordbook candidate before learning.
+///
+/// Rejects sentence-level text and numbered-list fragments that should never be
+/// learned as hotwords. Returns `Ok(())` if valid, `Err(reason)` if rejected.
+/// The rejection reason is a static string suitable for `log::debug!` (no allocation).
+pub fn is_valid_candidate(word: &str) -> Result<(), &'static str> {
+    let trimmed = word.trim();
+    if trimmed.is_empty() {
+        return Err("empty");
+    }
+    // WORDBOOK-MINLEN-242（Gavin 2026-09-20 端测报）：此前只有上限没有下限，
+    // 编辑态改一个字（最常见的是错字/标点修正）就会把单字灌进候选表。
+    // 单字对 ASR 热词偏置几乎无作用（一个字的上下文偏置不足以改变解码路径），
+    // 却会持续制造噪声候选。故设下限 2 字符。
+    if trimmed.chars().count() < MIN_CANDIDATE_CHARS {
+        return Err("below min char limit");
+    }
+    if trimmed.chars().count() > MAX_CANDIDATE_CHARS {
+        return Err("exceeds max char limit");
+    }
+    if trimmed.contains('。')
+        || trimmed.contains('！')
+        || trimmed.contains('？')
+        || trimmed.contains('；')
+    {
+        return Err("contains sentence-ending punctuation");
+    }
+    if trimmed.contains('\n') || trimmed.contains('\r') {
+        return Err("contains newline");
+    }
+    let first_char = trimmed.chars().next().unwrap();
+    if first_char.is_ascii_digit() {
+        let chars: Vec<char> = trimmed.chars().collect();
+        if chars.len() >= 2 {
+            let second = chars[1];
+            if second == '.' || second == '、' || second == ' ' || second == '\t' {
+                return Err("starts with numbered prefix");
+            }
+        }
+    }
+    if first_char == '①'
+        || first_char == '②'
+        || first_char == '③'
+        || first_char == '④'
+        || first_char == '⑤'
+        || first_char == '⑥'
+        || first_char == '⑦'
+        || first_char == '⑧'
+        || first_char == '⑨'
+        || first_char == '⑩'
+    {
+        return Err("starts with circled number prefix");
+    }
+    if trimmed.starts_with("- ") {
+        return Err("starts with dash-list prefix");
+    }
+    let comma_count = trimmed.chars().filter(|&c| c == '，' || c == ',').count();
+    if comma_count >= 2 {
+        return Err("multiple commas (sentence-level)");
+    }
+    let segments = trimmed.split_whitespace().count();
+    if segments > MAX_WHITESPACE_SEGMENTS {
+        return Err("too many whitespace segments");
+    }
+    Ok(())
+}
+
+/// Compatibility wrapper for the existing main pipeline.
+///
+/// New code should use `WordbookCache` directly so reads can stay in memory.
+pub struct Wordbook {
+    cache: RefCell<WordbookCache>,
+}
+
+impl Wordbook {
+    pub fn open() -> Result<Self> {
+        Ok(Self {
+            cache: RefCell::new(WordbookCache::load_from_db()?),
+        })
+    }
+
+    /// Manually add a word as a user-sourced entry.
+    pub fn add(&self, word: &str) -> Result<()> {
+        self.cache.borrow_mut().add_entry(word, "user")?;
+        Ok(())
+    }
+
+    /// Delete a word by id.
+    #[allow(dead_code)]
+    pub fn delete(&self, id: i64) -> Result<()> {
+        if let Some(entry) = db::get_entry_by_id(id)? {
+            self.cache.borrow_mut().remove_entry(&entry.word)?;
+        }
+        Ok(())
+    }
+
+    /// List all words for UI display.
+    #[allow(dead_code)]
+    pub fn list_all(&self) -> Result<Vec<WordEntry>> {
+        let entries = db::load_word_entries()?;
+        Ok(entries
+            .into_iter()
+            .map(|entry| WordEntry {
+                id: entry.id,
+                word: entry.word,
+                source: entry.source,
+                created_at: entry.created_at,
+            })
+            .collect())
+    }
+
+    /// Learn a correction by comparing original ASR output with edited text.
+    /// WORDBOOK-SINGLEWORD-001-CORE: produces corrected-side word for single-word model.
+    #[allow(dead_code)]
+    pub fn learn_correction(&self, original: &str, edited: &str, threshold: u32) -> Result<()> {
+        let Some(corrected_part) = extract_correction_word(original, edited) else {
+            return Ok(());
+        };
+
+        self.learn_suggestion(&corrected_part, threshold)
+    }
+
+    pub fn learn_suggestion(&self, word: &str, threshold: u32) -> Result<()> {
+        let word = word.trim();
+        if word.is_empty() {
+            return Ok(());
+        }
+
+        // WORDBOOK-053-C: reject sentence-level / numbered-list candidates before
+        // they enter the candidate table or get promoted to the wordbook.
+        // Uses log::debug! (filtered out in release builds where LevelFilter=Warn,
+        // zero disk IO per Gavin's "reduce real-time log IO" requirement).
+        if let Err(reason) = is_valid_candidate(word) {
+            log::debug!("Auto-learn candidate rejected ({}): {:?}", reason, word);
+            return Ok(());
+        }
+
+        if self.cache.borrow().exists(word) {
+            let _ = db::delete_candidate(word);
+            return Ok(());
+        }
+
+        let threshold = threshold.max(1);
+        let count = db::upsert_candidate(word)?;
+        // WORDBOOK-AUTOLEARN-OBS-218: 用 warn 级承载（release 非 debug 模式
+        // main.rs 的 LevelFilter=Warn 会把 info! 整条滤掉，用户看不到自动学习效果）。
+        // 前缀 [AUTOLEARN] 供 grep；不改全局日志级别（Gavin 要求压低实时日志 IO）。
+        if count < threshold {
+            log::warn!(
+                "[AUTOLEARN] candidate observed: '{}' ({}/{})",
+                word,
+                count,
+                threshold
+            );
+            return Ok(());
+        }
+
+        log::warn!(
+            "[AUTOLEARN] promoted after threshold: '{}' ({}/{})",
+            word,
+            count,
+            threshold
+        );
+        self.cache.borrow_mut().add_entry(word, "system")?;
+        let _ = db::delete_candidate(word);
+
+        Ok(())
+    }
+}
+
+/// AUTOLEARN-CANDIDATE-327：候选收窄规则（外置，根 `wordbook-rules.toml`）。
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ExtractRules {
+    #[serde(default = "default_sentence_enders")]
+    sentence_enders: String,
+    #[serde(default = "default_function_words")]
+    function_words: String,
+}
+fn default_sentence_enders() -> String {
+    "。！？；".to_string()
+}
+fn default_function_words() -> String {
+    "的了吗呢吧啊呀嘛哦嗯是在".to_string()
+}
+impl Default for ExtractRules {
+    fn default() -> Self {
+        Self {
+            sentence_enders: default_sentence_enders(),
+            function_words: default_function_words(),
+        }
+    }
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct WordbookRulesFile {
+    #[serde(default)]
+    extract: ExtractRules,
+}
+
+const BUILTIN_WORDBOOK_RULES: &str = include_str!("../../wordbook-rules.toml");
+
+/// 收窄规则缓存（exe 同级优先、内置默认兜底，见根 `wordbook-rules.toml`）。
+static EXTRACT_RULES: OnceLock<ExtractRules> = OnceLock::new();
+
+fn extract_rules() -> &'static ExtractRules {
+    EXTRACT_RULES.get_or_init(|| {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let path = dir.join("wordbook-rules.toml");
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    match toml::from_str::<WordbookRulesFile>(&content) {
+                        Ok(r) => {
+                            log::info!("Wordbook extract rules loaded from {:?}", path);
+                            return r.extract;
+                        }
+                        Err(e) => log::warn!(
+                            "wordbook-rules.toml parse error in {:?}, falling back to builtin: {}",
+                            path,
+                            e
+                        ),
+                    }
+                }
+            }
+        }
+        match toml::from_str::<WordbookRulesFile>(BUILTIN_WORDBOOK_RULES) {
+            Ok(r) => r.extract,
+            Err(e) => {
+                log::warn!("wordbook builtin rules parse error: {}", e);
+                ExtractRules::default()
+            }
+        }
+    })
+}
+
+/// AUTOLEARN-CANDIDATE-327：把 diff 出的跨度**二次收窄**为「干净词」。
+///
+/// 为什么需要：`extract_correction_word` 按【字符】diff（掐公共前缀+公共后缀）。当 ASR 把句子
+/// 后半段也听错时公共后缀为空，候选会一路吞到句尾（连标点/整短语）——如
+/// `"指导灵的信息吗？"` 被 `is_valid_candidate` 以「含句末标点」拒，4 次只落 1 次计数。
+///
+/// 三级（保守）：
+/// 1. **句末标点截断**：首个 `。！？；` 之前；
+/// 2. **虚词切前导词块**：首个虚词之前（`指导灵的信息吗` → `指导灵`）；
+/// 3. **保守丢弃**：发生过切分且结果 <2 字，或仍含句末标点 ⇒ `None`
+///    （未发生切分则**原样返回**：单字交 `is_valid_candidate` 拒，保持既有 `Some("好")` 用例不变）。
+///
+/// 🔴 只让「送进校验的东西更干净」，不放宽任何校验/门槛；宁可抽不出也不送垃圾。
+fn narrow_candidate(span: &str) -> Option<String> {
+    let rules = extract_rules();
+    let mut cut_applied = false;
+    let mut s = span.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // 1) 句末标点截断
+    if let Some(i) = s.find(|c| rules.sentence_enders.contains(c)) {
+        cut_applied = true;
+        s = s[..i].trim_end();
+    }
+    if s.is_empty() {
+        return None;
+    }
+    // 2) 首个虚词处切前导词块
+    if let Some((i, _)) = s
+        .char_indices()
+        .find(|(_, c)| rules.function_words.contains(*c))
+    {
+        cut_applied = true;
+        s = s[..i].trim_end();
+    }
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // 3) 保守丢弃
+    if cut_applied && s.chars().count() < 2 {
+        return None;
+    }
+    if s.chars().any(|c| rules.sentence_enders.contains(c)) {
+        return None;
+    }
+    Some(s.to_string())
+}
+
+/// WORDBOOK-SINGLEWORD-001-CORE: Extract corrected-side word from original vs edited text.
+/// Preserves the diff extraction logic but returns only the corrected part (the word to learn).
+/// This is for future WORDBOOK-CORRECTION-UI-001 纠错入口 reuse.
+///
+/// AUTOLEARN-CANDIDATE-327：diff 跨度再经 [`narrow_candidate`] 二次收窄（只收窄、不放宽校验）。
+fn extract_correction_word(original: &str, edited: &str) -> Option<String> {
+    if original == edited {
+        return None;
+    }
+
+    let orig_words = tokenize(original);
+    let edit_words = tokenize(edited);
+
+    let common_prefix = orig_words
+        .iter()
+        .zip(edit_words.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let common_suffix = orig_words
+        .iter()
+        .rev()
+        .zip(edit_words.iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    let orig_mid_end = orig_words.len().saturating_sub(common_suffix);
+    let edit_mid_end = edit_words.len().saturating_sub(common_suffix);
+
+    if common_prefix >= orig_mid_end || common_prefix >= edit_mid_end {
+        return None;
+    }
+
+    let corrected_part = edit_words[common_prefix..edit_mid_end].join("");
+
+    if corrected_part.is_empty() {
+        return None;
+    }
+
+    // AUTOLEARN-CANDIDATE-327：二次收窄（收窄后仍为空 ⇒ None）。
+    narrow_candidate(&corrected_part)
+}
+
+fn tokenize(text: &str) -> Vec<String> {
+    text.chars().map(|c| c.to_string()).collect()
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct WordEntry {
+    pub id: i64,
+    pub word: String,
+    pub source: String,
+    pub created_at: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_correction_word;
+    // 上限收窄护栏用：边界断言绑定常量而非字面量，改了常量断言自动跟随。
+    use super::MAX_CANDIDATE_CHARS;
+
+    #[test]
+    fn test_extract_correction_word_uses_changed_middle_segment() {
+        let word = extract_correction_word("我想用微型免", "我想用voice ime");
+        assert_eq!(word, Some("voice ime".to_string()));
+    }
+
+    #[test]
+    fn test_extract_correction_word_returns_none_for_identical_text() {
+        assert_eq!(extract_correction_word("一样", "一样"), None);
+    }
+
+    #[test]
+    fn test_extract_correction_word_returns_corrected_side() {
+        let word = extract_correction_word("我吃了苹果", "我吃了梨");
+        assert_eq!(word, Some("梨".to_string()));
+    }
+
+    #[test]
+    fn test_extract_correction_word_trims_whitespace() {
+        let word = extract_correction_word("测试", " 测试词 ");
+        assert_eq!(word, Some("测试词".to_string()));
+    }
+
+    #[test]
+    fn test_extract_correction_word_empty_corrected_returns_none() {
+        let word = extract_correction_word("测试", "  ");
+        assert_eq!(word, None);
+    }
+
+    // WORDBOOK-053-B: explicit direction guards for overlay edit auto-learning.
+    // `learn_correction(original, edited)` calls `extract_correction_word(original, edited)` and
+    // learns the *edited* side. These tests pin that behavior so the feature cannot silently learn
+    // the ASR-misrecognized word instead of the user's correction.
+
+    #[test]
+    fn test_extract_correction_word_learns_user_correction() {
+        // ASR said "阿里云", user corrected to "阿里運". The learned word must be "阿里運".
+        assert_eq!(
+            extract_correction_word("阿里云", "阿里運"),
+            Some("運".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_correction_word_learns_user_correction_longer() {
+        // ASR said "我想用微型免", user corrected to "我想用voice ime".
+        assert_eq!(
+            extract_correction_word("我想用微型免", "我想用voice ime"),
+            Some("voice ime".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_correction_word_does_not_learn_original_side() {
+        // Reverse the previous case: if original were learned, the result would be "阿里云" or its
+        // diff segment. We assert the function returns None when arguments are swapped, proving
+        // the learned side is the *second* argument.
+        assert_eq!(
+            extract_correction_word("阿里運", "阿里云"),
+            Some("云".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_correction_word_repeated_short_phrase_learns_each_correction() {
+        // User says "好的" twice. First ASR gives "好的" → edit stays "好的" (no change, None).
+        // Second ASR gives "号的" → user corrects to "好的" → learn the corrected side.
+        assert_eq!(extract_correction_word("好的", "好的"), None);
+        assert_eq!(
+            extract_correction_word("号的", "好的"),
+            Some("好".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_correction_word_never_returns_original_side_text() {
+        // Orchestrator-specified direction guard: for original "阿里云" edited to "阿里運"-type
+        // input, the learned word must NEVER contain original-side text. The common prefix "阿里"
+        // is preserved context (present in both sides), so the guard checks the *distinctive*
+        // original-side char "云" that a wrong-side implementation would return instead of "運".
+        let learned = extract_correction_word("阿里云", "阿里運").expect("should learn a word");
+        assert!(
+            !learned.contains('云'),
+            "learned word {:?} must not contain original-side char 云",
+            learned
+        );
+        assert_eq!(learned, "運");
+    }
+
+    // AUTOLEARN-CANDIDATE-327：候选二次收窄
+    use super::narrow_candidate;
+
+    /// 🔴 本单验收核心：ASR 尾部也听错 ⇒ 公共后缀为空 ⇒ diff 跨度吞到句尾；
+    /// 收窄应得「指导灵」，而不是「指导灵的信息吗？」（后者被句末标点拒）。
+    #[test]
+    fn autolearn327_gavin_case_narrows_to_word() {
+        let orig = "这是一条来自自导灵的信息吗。";
+        let edited = "这是一条来自指导灵的信息吗？";
+        assert_eq!(
+            extract_correction_word(orig, edited),
+            Some("指导灵".to_string())
+        );
+    }
+
+    /// 尾部听对的情形（公共后缀存在，08:43:45 那类）⇒ 仍直接得「指导灵」，收窄不改行为。
+    #[test]
+    fn autolearn327_tail_correct_still_yields_word() {
+        let orig = "这是一条来自知道零的信息吗？";
+        let edited = "这是一条来自指导灵的信息吗？";
+        assert_eq!(
+            extract_correction_word(orig, edited),
+            Some("指导灵".to_string())
+        );
+    }
+
+    /// 🔴 主控指出的不对称代价：无句末标点、也不超 30 上限的整短语若不被虚词切开，
+    /// 会径直进候选表。收窄应在「是」处切出「指导灵」。
+    #[test]
+    fn autolearn327_asymmetric_phrase_is_narrowed() {
+        assert_eq!(
+            narrow_candidate("指导灵是一种能量"),
+            Some("指导灵".to_string())
+        );
+    }
+
+    /// 切出来只剩单字 / 以虚词开头 ⇒ None（宁可抽不出），不靠 is_valid_candidate 兜底。
+    #[test]
+    fn autolearn327_narrowed_to_single_char_is_dropped() {
+        assert_eq!(narrow_candidate("这是一条信息"), None);
+        assert_eq!(narrow_candidate("是的"), None);
+    }
+
+    /// 反例护栏：整句被改写 ⇒ 不许抽出一长串短语。
+    #[test]
+    fn autolearn327_whole_sentence_rewrite_no_candidate() {
+        let orig = "甲乙丙丁戊己庚辛";
+        let edited = "这是一条来自指导灵的信息吗？";
+        assert_eq!(extract_correction_word(orig, edited), None);
+    }
+
+    /// 未发生切分 ⇒ 原样返回（单字交 is_valid_candidate 拒，保持既有用例语义）。
+    #[test]
+    fn autolearn327_no_cut_is_passthrough() {
+        assert_eq!(narrow_candidate("好"), Some("好".to_string()));
+        assert_eq!(narrow_candidate(" 测试词 "), Some("测试词".to_string()));
+    }
+
+    // WORDBOOK-053-C: is_valid_candidate guard tests
+
+    use super::is_valid_candidate;
+
+    /// WORDBOOK-MINLEN-242（Gavin 2026-09-20 端测报）：编辑态改一个字就把单字灌进候选表。
+    /// 此前 `is_valid_candidate` 只有上限（30）没有下限，单字一路放行。
+    /// 本用例钉死下限，防复发；边界外（2 字）必须仍然放行。
+    #[test]
+    fn minlen242_single_char_candidate_rejected() {
+        // 单字一律拒绝——中英文、数字皆然
+        assert!(is_valid_candidate("好").is_err(), "单个汉字不得入库");
+        assert!(is_valid_candidate("運").is_err(), "单个繁体字不得入库");
+        assert!(is_valid_candidate("a").is_err(), "单个字母不得入库");
+        assert!(
+            is_valid_candidate(" 好 ").is_err(),
+            "trim 后仍是单字，不得入库"
+        );
+        // 🔴 边界外：2 字是合法下限，不得被误挡
+        assert!(is_valid_candidate("飞音").is_ok(), "2 字中文专名必须放行");
+        assert!(is_valid_candidate("AI").is_ok(), "2 字母英文缩写必须放行");
+    }
+
+    #[test]
+    fn test_is_valid_candidate_rejects_real_dirty_sentence() {
+        // The exact sentence from debug.log (08-17 08:43:46) that prompted this task
+        let dirty = "1. 设置UI，点击设置热键，按下Alt键，没有任何反应。";
+        assert!(is_valid_candidate(dirty).is_err());
+    }
+
+    #[test]
+    fn test_is_valid_candidate_rejects_numbered_list_with_newlines() {
+        let dirty = "1. 3块2毛2的大葱
+2. 5块6毛钱的土豆";
+        assert!(is_valid_candidate(dirty).is_err());
+    }
+
+    #[test]
+    fn test_is_valid_candidate_rejects_dash_list_with_newlines() {
+        let dirty = "- 不能迟到早退。
+- 遵守课堂纪律，要尊重老师。";
+        assert!(is_valid_candidate(dirty).is_err());
+    }
+
+    #[test]
+    fn test_is_valid_candidate_rejects_circled_number_prefix() {
+        let dirty = "① 第一条注意事项";
+        assert!(is_valid_candidate(dirty).is_err());
+    }
+
+    #[test]
+    fn test_is_valid_candidate_rejects_multiple_commas() {
+        let dirty = "遵守纪律，不迟到，不早退";
+        assert!(is_valid_candidate(dirty).is_err());
+    }
+
+    #[test]
+    fn test_is_valid_candidate_rejects_too_long() {
+        // 整句：远超上限，任何取值下都必须拒
+        let long = "一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一";
+        assert!(is_valid_candidate(long).is_err());
+        // 🔴 边界断言**绑定常量**，不写死字面量：改了 MAX_CANDIDATE_CHARS 这两条自动跟随，
+        //    不会像原注释那样留下「Exceeds MAX_CANDIDATE_CHARS=30」这种与代码脱节的说明。
+        let at_cap: String = "字".repeat(MAX_CANDIDATE_CHARS);
+        assert!(
+            is_valid_candidate(&at_cap).is_ok(),
+            "恰好等于上限必须放行（{} 字）",
+            MAX_CANDIDATE_CHARS
+        );
+        let over_cap: String = "字".repeat(MAX_CANDIDATE_CHARS + 1);
+        assert!(
+            is_valid_candidate(&over_cap).is_err(),
+            "超出上限 1 字必须拒（{} 字）",
+            MAX_CANDIDATE_CHARS + 1
+        );
+    }
+
+    /// 🔴 上限收窄护栏（30→12，Gavin 2026-09-21）：已知最长的**真实正例**必须仍能入库。
+    /// 这条是防「日后有人为挡短语继续往下收」—— 收到 10 以下就会伤到真词条。
+    #[test]
+    fn test_is_valid_candidate_longest_real_world_positives_still_pass() {
+        assert!(is_valid_candidate("Claude Code").is_ok(), "11 字英文短语");
+        assert!(is_valid_candidate("维生素B12").is_ok(), "6 字含数字专名");
+        assert!(is_valid_candidate("飞音输入法").is_ok(), "5 字产品名");
+        // 反向：短语必须被挡住。取 Gavin 端测原句去掉问号 = 13 字，
+        // 无句末标点、无编号、非整句长度 —— **上限 30 时它能原样进词库**，正是本次收窄的目标。
+        let phrase = "这是一条来自指导灵的信息吗";
+        assert_eq!(
+            phrase.chars().count(),
+            13,
+            "样例长度须 > 上限 12，否则本断言失去意义"
+        );
+        assert!(
+            is_valid_candidate(phrase).is_err(),
+            "13 字短语不得入库；此断言变红 = 上限又被放宽了"
+        );
+    }
+
+    #[test]
+    fn test_is_valid_candidate_rejects_too_many_segments() {
+        // 5 whitespace-separated segments (exceeds MAX_WHITESPACE_SEGMENTS=4)
+        let segments = "a b c d e";
+        assert!(is_valid_candidate(segments).is_err());
+    }
+
+    #[test]
+    fn test_is_valid_candidate_passes_normal_chinese_words() {
+        assert!(is_valid_candidate("阿里云").is_ok());
+        assert!(is_valid_candidate("飞音输入法").is_ok());
+        assert!(is_valid_candidate("五代十国").is_ok());
+        assert!(is_valid_candidate("维生素B12").is_ok());
+        assert!(is_valid_candidate("三五成群").is_ok());
+    }
+
+    #[test]
+    fn test_is_valid_candidate_passes_normal_english_words() {
+        assert!(is_valid_candidate("Claude Code").is_ok());
+        assert!(is_valid_candidate("voice ime").is_ok());
+        assert!(is_valid_candidate("LLM").is_ok());
+        assert!(is_valid_candidate("Cloud").is_ok());
+        assert!(is_valid_candidate("M2").is_ok());
+    }
+
+    #[test]
+    fn test_is_valid_candidate_passes_single_comma_phrase() {
+        // One comma is a two-word phrase, not a sentence
+        assert!(is_valid_candidate("三五成群，打架斗殴").is_ok());
+    }
+
+    #[test]
+    fn test_is_valid_candidate_rejects_empty() {
+        assert!(is_valid_candidate("").is_err());
+        assert!(is_valid_candidate("   ").is_err());
+    }
+}

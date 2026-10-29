@@ -1,0 +1,98 @@
+[package]
+name = "flashasr"
+version = "0.1.0"
+edition = "2021"
+
+# FLASH-P1：识别服务内核（无界面：加载本地实时模型、IPC、拉起网关）。
+[[bin]]
+name = "flashasr-core"
+path = "src/core/main.rs"
+
+# FLASH-P1：识别服务网关（对外协议 + 加密 + 终端配对；不加载模型，经本机 IPC 调内核）。
+[[bin]]
+name = "flashasr-gateway"
+path = "src/gateway/main.rs"
+
+[features]
+# 本地 PoC / 离线实验测试（文件不入库）；默认关。
+poc = []
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "time", "net", "io-util", "sync", "macros"] }
+# 网关：wss 服务端 + 自签证书
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rcgen = { version = "0.13", default-features = false, features = ["ring"] }
+ring = "0.17"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+
+# 本地实时识别：SenseVoice 预览 / VAD / 声纹 / CT 标点（sherpa-onnx），日韩标点（ort），离线翻译（CTranslate2）
+sherpa-onnx = { version = "1.13.8", default-features = false, features = ["shared"] }
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic"] }
+ctranslate2 = { version = "2.1.1", default-features = false, features = ["tokenizers"] }
+ctranslate2-sys = { version = "0.1.5", features = ["crt-dynamic", "shared", "ruy"] }
+sentencepiece = "0.13.1"
+
+# 大模型（输出优化 / 翻译）与在线 FunASR
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+tungstenite = { version = "0.26", default-features = false, features = ["handshake", "url", "rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+base64 = "0.22"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1"
+dirs = "5"
+crossbeam-channel = "0.5"
+notify = "8.2.0"
+atomic-write-file = "0.3.0"
+zhconv = { version = "0.4.1", default-features = false, features = ["compress", "opencc"] }
+pinyin = { version = "0.11", default-features = false, features = ["plain"] }
+chrono = "0.4"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+ctranslate2-sys = { version = "0.1.5", features = ["dnnl", "openmp-runtime-comp"] }
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winres = "0.1"
+
+[build-dependencies]
+cc = "1.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+# FLASH-P1 过渡：补丁暂引用 voice-ime 目录（ctranslate2-sys 含 oneDNN 源码约 57MB）；
+# 公开仓库首次推代码前改为本仓库自带（见 collab/todo.md）。
+[patch.crates-io]
+cmake = { path = "vendor/cmake" }
+ctranslate2-sys = { path = "../voice-ime/patches/ctranslate2-sys" }
+esaxx-rs = { path = "../voice-ime/patches/esaxx-rs" }
