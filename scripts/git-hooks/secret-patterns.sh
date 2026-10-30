@@ -42,7 +42,10 @@ SECRET_PLACEHOLDER='REDACTED|PLACEHOLDER|YOUR[_-]?|xxxx|EXAMPLE|CHANGE[_-]?ME|<[
 #                               （flashasr FLASH-P1 全历史审计时发现；同 johannesg 先例，非本项目凭证）
 #  - <名字>@2x.png 等          : 高分屏图片的文件名后缀（@2x / @3x + 图片扩展名），不是邮箱
 #                               （FLASH-P2b-03 Tauri 图标 128x128@2x.png 被误拦；只放行「@数字x.图片扩展名」整段）
-SECRET_EMAIL_WHITELIST='cdexs@hotmail\.com|gavinshare6@outlook\.com|johannesg@5d6\.de|alex@alexcrichton\.com|noreply@[A-Za-z0-9.-]+|@users\.noreply\.github\.com|@[A-Za-z0-9.-]+\.example\.com|@[0-9]x\.(png|jpe?g|webp|gif|svg|ico)\b'
+#  - patry.nicolas@protonmail.com : 上游 esaxx-rs crate（patches/esaxx-rs，原样入库）Cargo.toml 的 authors 公开字段
+#  - business@pglaf.org / gbnewby@pglaf.org : esaxx-rs 自带测试语料（古腾堡计划公版文本）许可声明里的公开联系地址
+#                               （P3-D 补丁从 voice-ime 迁入时被拦；同 alex@alexcrichton.com 先例，非本项目凭证）
+SECRET_EMAIL_WHITELIST='cdexs@hotmail\.com|gavinshare6@outlook\.com|johannesg@5d6\.de|alex@alexcrichton\.com|patry\.nicolas@protonmail\.com|business@pglaf\.org|gbnewby@pglaf\.org|noreply@[A-Za-z0-9.-]+|@users\.noreply\.github\.com|@[A-Za-z0-9.-]+\.example\.com|@[0-9]x\.(png|jpe?g|webp|gif|svg|ico)\b'
 
 # ---- 扫描函数 ---------------------------------------------------------
 

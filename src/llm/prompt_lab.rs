@@ -48,8 +48,8 @@ use super::*;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-/// 生产配置路径。只读取，绝不回写。
-const PROD_CONFIG: &str = "D:/Workspace/CodeLab/voice-ime/Publish/config.toml";
+/// 实测配置路径（flashasr 开发版的 config.toml，在 exe 旁）。只读取，绝不回写。
+const PROD_CONFIG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/debug/config.toml");
 
 // ============================================================
 // 期望行为与样本集

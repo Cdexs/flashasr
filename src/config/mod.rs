@@ -1082,14 +1082,14 @@ clipboard_delay_ms = 150
     #[ignore = "requires notify file watcher implementation (TEST-SYNC-CONFIG-WATCHER-001 P2)"]
     fn watcher_reloads_on_external_config_change() {
         // 预期手动验证步骤：
-        // 1. 启动 voice-ime.exe -debug
+        // 1. 启动 flashasr.exe
         // 2. 修改 config.toml（如修改 hotkey.vk_code）
         // 3. 观察日志中是否出现 "Config file changed, reloading..."
         // 4. 验证新配置值在 Arc 中生效
         // 5. 验证无 panic 或 crash
         //
-        // E2E 验证脚本（PowerShell）：
-        //   $configPath = "$env:APPDATA\voice-ime\config.toml"
+        // E2E 验证脚本（PowerShell；flashasr 的 config.toml 在 exe 旁）：
+        //   $configPath = "target\debug\config.toml"
         //   # 修改 vk_code 为 0x70 (F1)
         //   (Get-Content $configPath) -replace 'vk_code = 0x78', 'vk_code = 0x70' | Set-Content $configPath
         //   # 观察日志

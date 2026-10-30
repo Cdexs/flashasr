@@ -30,7 +30,7 @@
 | FLASH-P2-05 | 协议扩展：`feiyin.scene`（场景给输出优化）、`usage.speech_ms`、终稿 `wordbook_hits` / `learn_suggestions`、未配大模型时的提示字段、`POST /v1/profile/voiceprint/reset` | ✅ 冒烟：词表命中、speech_ms、未配大模型提示、声纹重置（401 无 key）全过 |
 | FLASH-P2-06 | 本机自动配对：首次运行自动建「本机」终端，配对信息写到当前用户目录（只本人可读），供输入法自动发现 | ✅ |
 | FLASH-P2-07 | 测试（子 agent）+ 端到端冒烟 + 文档 | ✅ 协议文档 / README 同步；前台 52 / 引擎 1540 全过 |
-| FLASH-P2-08 | **详细 API 文档**（Gavin 10-29「Flashasr 开发完毕，要生成一份详细的 api 文档，方便调用者查阅和接入开发」）：在 `docs/ASR-PROTOCOL.md` 基础上出完整接入文档 —— 连接与配对、鉴权、`run-task` 全部参数与默认值、结果 / 译文 / 逐字时间格式、错误码全表与处理建议、`/v1/status`、声纹接口、时序图、多语言调用示例（Python / JavaScript / Kotlin / Swift 片段）、版本兼容规则。flashasr 功能开发完毕后做 | ⬜ |
+| FLASH-P2-08 | **详细 API 文档**（Gavin 10-29「Flashasr 开发完毕，要生成一份详细的 api 文档，方便调用者查阅和接入开发」）：在 `docs/ASR-PROTOCOL.md` 基础上出完整接入文档 —— 连接与配对、鉴权、`run-task` 全部参数与默认值、结果 / 译文 / 逐字时间格式、错误码全表与处理建议、`/v1/status`、声纹接口、时序图、多语言调用示例（Python / JavaScript / Kotlin / Swift 片段）、版本兼容规则。flashasr 功能开发完毕后做 | 🔄 编写中（docs/API.md） |
 
 ## 🔄 FLASH-P2b · 管理界面 + 安装包（Gavin 10-30「继续」）
 
@@ -56,7 +56,7 @@
 | FLASH-P3-B | 连 flashasr 补全：处理开关随请求传（输出优化 / 翻译 / ITN / 标点 / 繁简 / 去句末标点 / 场景）；收终稿译文、词库命中、学习建议、优化未做原因、`usage.speech_ms`；服务端已处理的文字本机不再重复处理；本机自动配对文件；连接码 `flash-asr://` | ✅ voice-ime + flashasr（finish-task 带翻译终值）；测试全过、冒烟通过；设置页「输出优化不要求本机 Key」并入 P3-C |
 | FLASH-P3-C | 首次使用连接向导（本机 flashasr 一键连 / 连接码 / 直连阿里 Key）+ 设置页连接方式；连 flashasr 时输出优化 / 翻译不要求本机 Key、显示服务端大模型状态（任务书 `collab/p3c-spec.md`）；本机需用户确认才连（Gavin 10-30） | ✅ voice-ime `3b840a0`，测试全过；待 Gavin 目视 |
 | FLASH-P3-D | 清理：目录清单（vendor/sherpa-onnx、vendor/llama-runtime、vendor/whisper-rs-sys、vendor/cmake、patches、sherpa-onnx-lib、models、`src/main - 副本.rs`）Gavin 确认后删；构建脚本 / 安装包 / macOS 脚本去模型运行库 | ⬜ |
-| FLASH-P3-E | 直连阿里：「2 秒停顿断句」vs「语义断句」真实录音对比后定缺省 | ⬜ |
+| FLASH-P3-E | 直连阿里断句方式 | ✅ Gavin 10-30「直连阿里直接采用语义断句，这个不必要再测试了，以前测试过」⇒ 缺省改语义断句（voice-ime 配置两处同步） |
 | FLASH-P3-F | 测试 + 端测（本机两件套松手到上屏 ≤ 旧版 +20ms）+ 五文档 + 跨端交接 | ⬜ |
 
 ## 📌 Gavin 10-30 交代（长期有效）
@@ -70,4 +70,4 @@
 - P2 flashasr 独立可用：前台 / 引擎双进程、`/v1/status`、管理界面、本机配对文件、安装包。
 - P3 输入法变薄。**⚠️ 输入法保留直连阿里 FunASR**（Gavin 10-29 最终定：「剥离出的前端输入法要保留直连阿里 FunASR 服务的能力。也就是说，前端输入法既可以直连阿里的 FunASR 服务，也可以连接我们自己部署的 FlashASR 服务。先记下来，后面改前端语音输入法的时候再实施。」）：直连 + 连 flashasr 两条路并存，直连模式下哪些处理环节可用随 P3 方案定。P4 发版。
 - FLASH-P1 遗留：连接码前缀已改为 `flash-asr://`（Gavin 10-30；P3 输入法按新前缀解析，不认旧前缀）；单实例保护（两个内核会抢端口 / 管道）P2 做。
-- 公开仓库首次推送代码前：把引用 voice-ime 的预编译库 / 补丁改为本仓库自带或下载脚本（公开仓库不能依赖兄弟目录）。
+- ✅（10-30）公开仓库首次推送代码前：把引用 voice-ime 的预编译库 / 补丁改为本仓库自带或下载脚本 —— 已迁入 `patches/`、`vendor/sherpa-onnx/`、`vendor/llama-runtime/`、`vendor/runtime/`、`scripts/fetch-*.ps1`，本仓库不再引用 voice-ime 任何目录。

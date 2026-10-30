@@ -6,13 +6,22 @@
 #   3. cd src-tauri; cargo build --release --features custom-protocol → src-tauri\target\release\flashasr-ui.exe
 # 然后：powershell -NoProfile -ExecutionPolicy Bypass -File scripts\assemble-publish.ps1
 #
-# 运行库（sherpa-onnx / onnxruntime / CTranslate2 / llama.cpp / VC++）过渡期取自 voice-ime 的 Publish\（已验证的同一套）；
-# 推公开仓库前改为本仓库自带的下载脚本（见 collab/todo.md）。清单与 installer\flashasr.iss 的 [Files] 逐项对应，
-# 缺任何一项 ⇒ 报错退出（不静默跳过，免得装出一个跑不起来的包）。
+# 运行库取自本仓库 vendor\runtime\（被 .gitignore 忽略，不入库；2026-10-30 从 voice-ime 的 Publish\ 复制来的已验证同一套）。
+# 清单 = 下方 $runtime + ggml-cpu-*.dll，与 installer\flashasr.iss 的 [Files] 逐项对应，
+# 缺任何一项 ⇒ 报错退出（不静默跳过，免得装出一个跑不起来的包）。各 DLL 来源与更新方法：
+#   sherpa-onnx-c-api / sherpa-onnx-cxx-api / onnxruntime / onnxruntime_providers_shared
+#       ← vendor\sherpa-onnx\sherpa-onnx-v<版本>-win-x64-shared-MD-Release\lib\（scripts\fetch-sherpa-onnx.ps1 获取；
+#         升版本时同步改 .cargo\config.toml 的 SHERPA_ONNX_LIB_DIR）
+#   ggml-base / ggml / llama / mtmd / ggml-vulkan / libomp / ggml-cpu-*
+#       ← scripts\fetch-llama-runtime.ps1 -Targets vendor\runtime -SkipModel（解压在 vendor\llama-runtime\<tag>\）
+#   ctranslate2.dll
+#       ← patches\ctranslate2-sys 构建产物（cargo build 后由其 build.rs 复制到 target\<profile>\）
+#   msvcp140 / msvcp140_1 / vcruntime140 / vcruntime140_1 / vcomp140
+#       ← Visual Studio 的 VC Redist 目录（VC\Redist\MSVC\<版本>\x64\Microsoft.VC14x.CRT 与 .OpenMP）
 # 本文件带 UTF-8 BOM（Windows PowerShell 5.1 无 BOM 会按 GBK 读，中文注释会报语法错）。
 
 param(
-    [string]$RuntimeDir = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) "voice-ime\Publish")
+    [string]$RuntimeDir = (Join-Path (Split-Path $PSScriptRoot -Parent) "vendor\runtime")
 )
 
 $ErrorActionPreference = "Stop"

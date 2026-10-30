@@ -94,9 +94,8 @@ strip = true
 [profile.dev]
 opt-level = 1
 
-# FLASH-P1 过渡：补丁暂引用 voice-ime 目录（ctranslate2-sys 含 oneDNN 源码约 57MB）；
-# 公开仓库首次推代码前改为本仓库自带（见 collab/todo.md）。
+# 补丁源自 voice-ime，本仓库自带（2026-10-30 迁入 patches/；ctranslate2-sys 含 oneDNN 源码约 57MB）。
 [patch.crates-io]
 cmake = { path = "vendor/cmake" }
-ctranslate2-sys = { path = "../voice-ime/patches/ctranslate2-sys" }
-esaxx-rs = { path = "../voice-ime/patches/esaxx-rs" }
+ctranslate2-sys = { path = "patches/ctranslate2-sys" }
+esaxx-rs = { path = "patches/esaxx-rs" }

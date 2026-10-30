@@ -8,3 +8,8 @@ CLAUDE.md
 /ui/dist/
 /src-tauri/target/
 /src-tauri/gen/
+patches/**/target/
+/vendor/sherpa-onnx/*-Release/
+/vendor/llama-runtime/
+/vendor/runtime/
+/vendor/sherpa-onnx/*-Release.tar.bz2
