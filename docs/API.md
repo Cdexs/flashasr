@@ -420,6 +420,7 @@ Authorization: Bearer MFRGGZDFMZTWQ2LKNNWG23TPOA
 | `parameters.feiyin.output_optimization_enabled` | boolean | | `false` | 输出优化：用服务端配置的大模型整理文字。服务端没配大模型 ⇒ 跳过、照常出结果，并在终稿标明（`optimization_skipped`）。与翻译的关系见 §6.3 |
 | `parameters.feiyin.strip_trailing_punct` | boolean | | `false` | 去掉终稿句末标点（句中保留）。只作用于原文，不作用于译文 |
 | `parameters.feiyin.chinese_script` | string | | 跟服务端设置 | `"simplified"`（简体）/ `"traditional"`（繁体），大小写与首尾空白不限；其它值或缺省 ⇒ 跟服务端设置 |
+| `parameters.feiyin.word_times` | boolean | | `true` | 终稿 `words` 是否要精确逐字时间。`false` ⇒ 说完后最后一段不再做强制对齐，终稿约快 0.25 秒，但最后一段的逐字时间改为估算（文字不变）。只要文字、不用时间（如输入法）时建议传 `false`；做字幕等需要准确时间时保持缺省 |
 | `parameters.feiyin.scene` | object | | 场景未知 | 输入场景，供输出优化 / 大模型翻译调整写法。不是对象或解析失败 ⇒ 视为未知 |
 | `parameters.feiyin.scene.kind` | string | | `""` | 见下方场景取值表 |
 | `parameters.feiyin.scene.style_hint` | string | | `""` | 自由文字风格提示，如「正式」「口语、简短」 |

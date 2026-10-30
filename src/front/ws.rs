@@ -760,6 +760,8 @@ impl Conn {
                 .is_object()
                 .then(|| serde_json::from_value(p["feiyin"]["scene"].clone()).ok())
                 .flatten(),
+            // 终稿要不要精确逐字时间；缺省要（第三方字幕等用途），飞音输入法传 false 换松键更快出终稿。
+            word_times: p["feiyin"]["word_times"].as_bool().unwrap_or(true),
         };
         let (session, rx) = self.shared.core.open(&params);
         self.task = Some(Task {
@@ -1202,6 +1204,7 @@ mod tests {
             r#"traditional:chinese_script(&p["feiyin"]["chinese_script"])"#,
             r#"optimize:p["feiyin"]["output_optimization_enabled"].as_bool().unwrap_or(false)"#,
             r#"translate:p["translation_enabled"].as_bool().unwrap_or(false)"#,
+            r#"word_times:p["feiyin"]["word_times"].as_bool().unwrap_or(true)"#,
         ] {
             assert!(compact.contains(needle), "缺少：{needle}");
         }

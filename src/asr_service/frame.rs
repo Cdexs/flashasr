@@ -189,6 +189,10 @@ pub(crate) struct OpenParams {
     /// FLASH-P2-05：终端采集的场景（`feiyin.scene`），供输出优化按场景调整写法；没带 ⇒ 场景未知。
     #[serde(default)]
     pub scene: Option<ScenePayload>,
+    /// 终稿是否要精确逐字时间（`feiyin.word_times`，默认要）。不要 ⇒ 松键后最后一窗不做强制对齐
+    ///（省 ~0.25s；接缝仍按上一窗逐字时间切，同本机 PIPE-SPEED-457），终稿 `words` 时间改为估算。
+    #[serde(default = "yes")]
+    pub word_times: bool,
 }
 
 /// FLASH-P2-05：终端带来的场景（帧与网关共用，不依赖 `scene` 模块；内核换算成 `SceneContext`）。
@@ -223,6 +227,7 @@ impl Default for OpenParams {
             traditional: None,
             optimize: false,
             scene: None,
+            word_times: true,
         }
     }
 }

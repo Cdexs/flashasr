@@ -80,7 +80,8 @@ fn step(text: String, times: Times, f: impl FnOnce(&str) -> String) -> (String, 
     (out, t)
 }
 
-/// 预览帧：同音纠错 ⇒ 数字规整（参数）⇒ 关标点时全剥。
+/// 预览帧：同音纠错 ⇒ 数字规整（参数）⇒ 关标点时全剥 ⇒ 繁简（同终稿：跟终端 `chinese_script`）。
+/// 繁简放最后：同音 / 数字规则按简体写；预览与终稿用同一个转换函数，选了繁体时两者字形一致。
 pub(crate) fn apply_preview(
     text: &str,
     times: &[Option<CharTime>],
@@ -95,13 +96,16 @@ pub(crate) fn apply_preview(
     } else {
         cur
     };
-    if o.punctuation {
+    let cur = if o.punctuation {
         cur
     } else {
         step(cur.0, cur.1, |t| {
             punctuation::apply_l2_postprocess(t, false, false).0
         })
-    }
+    };
+    step(cur.0, cur.1, |t| {
+        text_normalizer::normalize_text_for_language(t, o.script)
+    })
 }
 
 /// 预览的「末尾未稳定字数」换算到处理后的文字（数字规整等会改字数，如「一百二十」⇒「120」）。

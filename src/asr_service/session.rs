@@ -158,6 +158,7 @@ pub(crate) fn run_remote_session(
                     script,
                     acc_event_tx,
                     REMOTE_GEN,
+                    params.word_times,
                 )
             })
         });
@@ -313,7 +314,7 @@ pub(crate) fn run_remote_session(
     } else if vp_dropped_all {
         (String::new(), Vec::new())
     } else {
-        let t = whole_fallback_times(slot, &pcm, &preview_text, &composer);
+        let t = whole_fallback_times(slot, &pcm, &preview_text, &composer, params.word_times);
         (preview_text, t)
     };
     let text = text_normalizer::normalize_text_for_language(final_src.trim(), script);
@@ -372,14 +373,16 @@ fn wordbook_hits(vocabulary: &[String], text: &str) -> Vec<String> {
 }
 
 /// S9（T4）：精解为空、终稿退回预览收尾文本时的逐字时间 —— 录音不长 ⇒ 整段强制对齐一次（录音时间轴，
-/// 无需换算）；对不上 / 太长 ⇒ 从合成器的显示时间（预览粗略）搬过来；再没有 ⇒ `None`（输出前补估算）。
+/// 无需换算）；对不上 / 太长 / 终端不要精确逐字时间（`word_times=false`）⇒ 从合成器的显示时间（预览粗略）
+/// 搬过来；再没有 ⇒ `None`（输出前补估算）。
 fn whole_fallback_times(
     slot: &AccEngine,
     pcm: &[f32],
     text: &str,
     composer: &RemoteComposer,
+    word_times: bool,
 ) -> Vec<Option<CharTime>> {
-    if !text.trim().is_empty() && pcm.len() as f32 / 16000.0 <= WHOLE_ALIGN_MAX_SECS {
+    if word_times && !text.trim().is_empty() && pcm.len() as f32 / 16000.0 <= WHOLE_ALIGN_MAX_SECS {
         if let Some(o) = slot.align(pcm, text) {
             if o.char_times.len() == text.chars().count() {
                 return o

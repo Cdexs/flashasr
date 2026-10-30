@@ -22,6 +22,8 @@ pub(crate) fn run_acc_windows(
     acc_script: config::ChineseScript,
     acc_event_tx: crossbeam_channel::Sender<PipelineEvent>,
     session_generation: u64,
+    // 远程终端要不要最后一窗的精确逐字时间（`feiyin.word_times`）；不要 ⇒ 最后一窗同本机不对齐。
+    align_last_window: bool,
 ) -> (String, String, bool, f64, bool, AccTimes) {
     // ── SLIDING-WINDOW-367：滑动窗口（当前片+前1~3，12s 封顶）──
     // （阶段四·B）窗口解码投**并发池**（默认并发度 2，设 1 退顺序），
@@ -186,8 +188,9 @@ pub(crate) fn run_acc_windows(
                                                         };
                                                         // PIPE-SPEED-457 ②：已松键且本窗是最后一窗 ⇒ 不对齐（最终结果不等这 ~0.25s；
                                                         // 该接缝按上一窗逐字时间切，456 半截结果同一路径）。
-                                                        // ASR-SERVER-491 S9（T2）：远程会话要最后一句的逐字时间 ⇒ 照常对齐（本机不变）。
-                                                        if !recognizer.is_remote()
+                                                        // ASR-SERVER-491 S9（T2）：远程会话要最后一句的逐字时间 ⇒ 照常对齐（本机不变）；
+                                                        // 终端声明不要（`feiyin.word_times=false`，飞音输入法）⇒ 同本机跳过。
+                                                        if !(recognizer.is_remote() && align_last_window)
                                                             && seq + 1 == final_windows.load(Ordering::Acquire)
                                                         {
                                                             log::debug!("[PIPE-457] last window: skip align seq={}", seq);

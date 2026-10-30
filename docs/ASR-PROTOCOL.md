@@ -161,6 +161,7 @@ Authorization: Bearer <key>
 | `parameters.feiyin.output_optimization_enabled` | | `false` | 输出优化（大模型整理文字）。大模型用服务端统一配置；服务端没配 ⇒ 跳过此步、照常出结果 |
 | `parameters.feiyin.strip_trailing_punct` | | `false` | 去掉句末标点（句中标点保留） |
 | `parameters.feiyin.chinese_script` | | 服务端设置 | `"simplified"` / `"traditional"`；其它值 ⇒ 跟服务端设置 |
+| `parameters.feiyin.word_times` | | `true` | 终稿要不要精确逐字时间；`false` ⇒ 说完后最后一段不做强制对齐（终稿约快 0.25s，最后一段时间改估算，文字不变） |
 | `parameters.feiyin.scene` | | 未知场景 | 输入场景，供输出优化 / 大模型翻译调整写法：`{"kind": "chat", "style_hint": "", "multiline_safe": false}`。`kind` 取 `chat` / `agent` / `email` / `doc` / `ide_terminal` / `browser`，其它 ⇒ 未知；`style_hint` 自由文字风格提示（如「正式」）；`multiline_safe` = 目标输入框能否接受换行。窗口标题、程序名**不要传**（隐私） |
 | `parameters.feiyin.device_id` / `device_name` | ✅ | — | §1.4。缺 ⇒ `MissingDeviceInfo` 并断开 |
 | `header.streaming`、`payload.task_group / task / function / model / input` | | — | 服务端忽略，照百炼写即可（方便同一份代码对接百炼） |
