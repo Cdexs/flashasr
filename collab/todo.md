@@ -48,6 +48,17 @@
 | FLASH-P2b-04 | Windows 安装包脚本（Inno Setup；不出包，等 Gavin 指令） | ✅ `installer/flashasr.iss` 已写（只按用户装；卸载可选删数据、保留模型）；未编译。出包前还缺「组装 Publish 目录」脚本 |
 | FLASH-P2b-05 | 测试（子 agent）+ 界面请 Gavin 目视确认 + 文档 | ✅ |
 
+## 🔄 FLASH-P3 · 输入法变薄（Gavin 10-30「继续开发」；代码在 voice-ime，依赖地图 `collab/p3-survey.md`）
+
+| 单号 | 子项 | 状态 |
+| --- | --- | --- |
+| FLASH-P3-A | 删本地引擎与模型：AsrModel 只留 FunAsrRealtime（直连阿里）+ FeiyinServer（连 flashasr）；删 asr_service 服务端 + 网关、本地实时 / performance / accuracy / qwen-audio、标点模型（拆出纯规则）、离线翻译（留方向判定）、VAD / 声纹 / llama / 对齐；在线 VAD 门控、接缝重判、本地标点、离线翻译回退去掉；有效时长改整段；设置界面去模型下拉多余项与模型下载提示、去「识别服务」页；Cargo 依赖与 build.rs 去模型部分。**不删任何目录**（vendor / patches / models / sherpa-onnx-lib 留到 P3-D 列清单确认）、不动 `src/main - 副本.rs`（未入库） | 🔄 派实现 agent |
+| FLASH-P3-B | 连 flashasr 补全：处理开关随请求传（输出优化 / 翻译 / ITN / 标点 / 繁简 / 去句末标点 / 场景）；收终稿译文、词库命中、学习建议、优化未做原因、`usage.speech_ms`；服务端已处理的文字本机不再重复处理；本机自动配对文件；连接码 `flash-asr://` | ⬜ |
+| FLASH-P3-C | 首次使用连接向导（本机 flashasr 一键连 / 连接码 / 直连阿里 Key）+ 设置页连接方式 | ⬜ |
+| FLASH-P3-D | 清理：目录清单（vendor/sherpa-onnx、vendor/llama-runtime、vendor/whisper-rs-sys、vendor/cmake、patches、sherpa-onnx-lib、models、`src/main - 副本.rs`）Gavin 确认后删；构建脚本 / 安装包 / macOS 脚本去模型运行库 | ⬜ |
+| FLASH-P3-E | 直连阿里：「2 秒停顿断句」vs「语义断句」真实录音对比后定缺省 | ⬜ |
+| FLASH-P3-F | 测试 + 端测（本机两件套松手到上屏 ≤ 旧版 +20ms）+ 五文档 + 跨端交接 | ⬜ |
+
 ## ⏳ 后续（方案 §8）
 
 - P2 flashasr 独立可用：前台 / 引擎双进程、`/v1/status`、管理界面、本机配对文件、安装包。
