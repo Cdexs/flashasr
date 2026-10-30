@@ -76,7 +76,8 @@ pub fn apply_llm(text: &str, c: &LlmConfig) -> Result<String, String> {
 
 #[tauri::command]
 pub fn llm_get() -> Result<LlmConfig, String> {
-    let text = std::fs::read_to_string(config_path()).map_err(|_| ERR_CONFIG_MISSING.to_string())?;
+    let text =
+        std::fs::read_to_string(config_path()).map_err(|_| ERR_CONFIG_MISSING.to_string())?;
     parse_llm(&text)
 }
 
@@ -186,7 +187,10 @@ mod tests {
             connectivity_verified: true,
         };
         let out = apply_llm(src, &c).unwrap();
-        assert!(out.starts_with("# 注释\nui_language = \"Chinese\"\n"), "{out}");
+        assert!(
+            out.starts_with("# 注释\nui_language = \"Chinese\"\n"),
+            "{out}"
+        );
         assert!(out.contains("[audio]\nasr_model = \"local_realtime\"\n"));
         let back = parse_llm(&out).unwrap();
         assert_eq!(back.api_url, "https://x/v1", "首尾空白去掉");
@@ -204,6 +208,9 @@ mod tests {
     #[test]
     fn chat_url_forms() {
         assert_eq!(chat_url("https://a/v1/"), "https://a/v1/chat/completions");
-        assert_eq!(chat_url("https://a/v1/chat/completions"), "https://a/v1/chat/completions");
+        assert_eq!(
+            chat_url("https://a/v1/chat/completions"),
+            "https://a/v1/chat/completions"
+        );
     }
 }
