@@ -196,7 +196,15 @@ impl TerminalStore {
             .find(|t| t.id == id)
             .ok_or(AuthError::InvalidKey)?;
         let mut changed = false;
-        if !t.bound() {
+        if t.local {
+            // FLASH-P3-C（Gavin 10-30 同意）：本机终端不绑设备 —— 本机上谁都能读那份配对文件（只本人可读），
+            // key 又只认回环来源，绑设备没有安全增益，反而会被先连的测试客户端占住、让输入法被拒
+            //（「设备不符 ⇒ 需要重新配对」）。只记最近一次连接的设备。
+            if t.device_id != device_id {
+                t.device_id = device_id.to_string();
+                changed = true;
+            }
+        } else if !t.bound() {
             t.device_id = device_id.to_string();
             changed = true;
         } else if t.device_id != device_id {
@@ -276,6 +284,23 @@ mod tests {
         assert_eq!(base32(b"f"), "MY");
         assert_eq!(base32(b"foobar"), "MZXW6YTBOI");
         assert_eq!(base32(&[0u8; 16]).len(), 26);
+    }
+
+    /// FLASH-P3-C：本机终端不绑设备 —— 先连的是测试客户端，输入法后连也不被拒；只记最近一次的设备。
+    #[test]
+    fn local_terminal_not_device_locked() {
+        let mut st = TerminalStore::default();
+        let (id, key) = st.create_local(1000).unwrap();
+        let (got, _) = st
+            .authorize(&key, "python-ref", "python-ref-client", 1100)
+            .unwrap();
+        assert_eq!(got, id);
+        let (got, changed) = st.authorize(&key, "ime-dev", "输入法", 1200).unwrap();
+        assert_eq!(got, id, "换设备也放行");
+        assert!(changed, "记下最近一次的设备");
+        assert_eq!(st.terminals[0].device_id, "ime-dev");
+        let (_, changed) = st.authorize(&key, "ime-dev", "输入法", 1300).unwrap();
+        assert!(!changed, "同一设备再来不必保存");
     }
 
     #[test]
