@@ -6,10 +6,10 @@
 ## 1. 什么时候弹向导
 
 - 主程序启动时判一次「连接能不能用」（纯函数，不新增配置项）：
-  - `asr_model = feiyin_server`：`RemotePairing::load()` 已配对，或本机 flashasr 配对文件存在（`local_flashasr_pairing().is_some()`）⇒ 可用；
+  - `asr_model = feiyin_server`：`RemotePairing::load()` 已配对 ⇒ 可用（**本机 flashasr 配对文件存在不算**，见下条）；
   - `asr_model = fun_asr_realtime`：`asr_online_api_key` 非空 ⇒ 可用；
   - 否则 ⇒ 不可用 ⇒ 拉起设置界面并直接打开向导（设置界面进程加启动参数，如 `--wizard`）。
-- 有本机 flashasr 就**不弹**（P3-B 已自动连上，零配置）。Windows 与 macOS 控制器都要接（macOS 侧写好、在 MACOS-HANDOFF 记「未编译验证」）。
+- 🔴 **发现本机 flashasr 也不自动连接，要用户确认**（Gavin 10-30：「如果发现本机有 Flash ASR 服务，不要自动连接，要让用户确认再连接」）：向导里显示「检测到本机的 flashasr」，用户点「使用」才写配对（`local=true`）。P3-B 的 `load_for_use` 去掉「没配对就自动用本机」分支，只保留「已确认的本机配对随本机文件刷新」。Windows 与 macOS 控制器都要接（macOS 侧写好、在 MACOS-HANDOFF 记「未编译验证」）。
 - 用户直接打开设置界面时，若连接不可用，「语音」页顶部显示同一向导入口（一张提示卡 +「设置连接」按钮），不强制弹。
 
 ## 2. 向导内容（设置界面里的模态对话框，沿用现有 `modal-overlay / modal-dialog` 与 card 样式）
