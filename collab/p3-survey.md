@@ -8,6 +8,11 @@
 - `src/punctuation/mod.rs`、`src/translation/mod.rs` 混着要保留的纯规则函数，不能整文件删，要先拆。
 - `src/asr_service/*`（本机当识别服务的服务端）完全依赖本地模型 ⇒ 整体删（连同 `src/bin/feiyin-asr-gateway/` 与只给它用的 tokio-tungstenite / tokio-rustls / rcgen）。
 
+## 接缝标点重判的去留（Gavin 10-30 问「这个不应该是在后端的 asr 服务里面做的吗」）
+
+- **连 flashasr**：是，服务端已做（终稿 DEC-112 剥光标点后整段重打）。flashasr 只回一句（`sentence_id` 恒 1）⇒ 输入法收到的 `seams` 为空，`repair_online_seams` 实际不动文字，只是白加载了 CT 标点模型 ⇒ P3 直接删，行为不变。
+- **直连阿里**：接缝误句号源自阿里按停顿断句（DEC-108「……差异，但是。根本的法则……」）。P3 后输入法无标点模型，本地重判不能留。建议：直连时开阿里「语义断句」（现有配置 `asr_online_semantic_punctuation_enabled`，当前缺省关），从源头少出误句号；开了输出优化时大模型也会顺手修。**待验证**：语义断句的终稿延迟与标点效果，P3 时用真实录音对比两种模式后定缺省。
+
 ## 1. AsrModel（`src/transcription/mod.rs:75-98`）
 
 变体：Performance、Accuracy、QwenAudioOnline、FunAsrRealtime、LocalRealtime、FeiyinServer。`from_config` :101；`is_online_streaming` :121；`uses_accuracy_engine` :136。
