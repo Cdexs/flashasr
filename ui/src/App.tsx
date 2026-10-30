@@ -78,9 +78,10 @@ function App() {
       <div className="sidebar">
         <div className="sidebar-title">
           <div className="sidebar-title-content">
-            <svg className="sidebar-logo-icon" viewBox="0 0 24 24" fill="none" stroke="var(--brand-primary)" strokeWidth="2">
-              <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/>
-              <path d="M19 10v2a7 7 0 01-14 0v-2"/>
+            {/* 声波 → 文字：语音识别服务（Gavin 10-30「图标不要再用麦克风了」），与程序图标同一图形。 */}
+            <svg className="sidebar-logo-icon" viewBox="0 0 24 24" fill="none" stroke="var(--brand-primary)" strokeWidth="2" strokeLinecap="round">
+              <path d="M3 10v4M6 6.5v11M9 8.5v7M12 10.5v3"/>
+              <path d="M15 8.5h6M15 12h6M15 15.5h4"/>
             </svg>
             <span className="sidebar-title-text">{t.app_title}</span>
           </div>

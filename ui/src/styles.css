@@ -1,7 +1,7 @@
 /* ============================================
    voice-ime Tauri Settings UI
    Windows 11 Fluent Design 风格
-   橘色品牌主题 #ff6b35 融合系统灰
+   橘色品牌主题 #2f6bff 融合系统灰
    ============================================ */
 
 /* === Fluent Design Token 体系 === */
@@ -25,13 +25,14 @@
   --system-fill-active: rgba(0, 0, 0, 0.0235);
   --system-fill-selected: rgba(0, 0, 0, 0.0824);
   
-  /* 品牌色（橘色 #ff6b35） */
-  --brand-primary: #ff6b35;
-  --brand-hover: #e55a2b;
-  --brand-active: #cc4f25;
-  --brand-subtle: #fff7ed;
-  --brand-border: #fed7aa;
-  --brand-text: #9a3412;
+  /* 品牌色（橘色 #2f6bff） */
+  /* flashasr 品牌色：电光蓝（Gavin 10-30「flashasr平台颜色改为蓝色」「要是那种高级时尚蓝色，不是传统单调沉闷的蓝色」；输入法 voice-ime 仍为橙）。 */
+  --brand-primary: #2f6bff;
+  --brand-hover: #1f57eb;
+  --brand-active: #1847c9;
+  --brand-subtle: #eef4ff;
+  --brand-border: #c7d8ff;
+  --brand-text: #1a3a8f;
 
   /* 状态色 */
   --status-warning: #f59e0b;
@@ -98,7 +99,7 @@ input, textarea, [contenteditable="true"] {
 .sidebar {
   width: 200px;
   /* 设计图：半透明背景 + 淡橘色渐变光晕 */
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.6) 0%, rgba(255, 247, 237, 0.8) 100%);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.6) 0%, rgba(238, 244, 255, 0.8) 100%);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   /* 顶部留白统一由 sidebar 容器负责，避免标题栏再叠加补丁式偏移 */
@@ -184,7 +185,7 @@ input, textarea, [contenteditable="true"] {
   left: -40px;
   width: 200px;
   height: 200px;
-  background: radial-gradient(circle, rgba(255, 107, 53, 0.08) 0%, transparent 70%);
+  background: radial-gradient(circle, rgba(47, 107, 255, 0.08) 0%, transparent 70%);
   pointer-events: none;
   z-index: 0;
 }
@@ -214,7 +215,7 @@ input, textarea, [contenteditable="true"] {
 
 .sidebar-nav-item.active {
   /* 设计图：浅橘色渐变背景 + 橘色文字 */
-  background: linear-gradient(90deg, rgba(255, 107, 53, 0.12) 0%, rgba(255, 107, 53, 0.06) 100%);
+  background: linear-gradient(90deg, rgba(47, 107, 255, 0.12) 0%, rgba(47, 107, 255, 0.06) 100%);
   font-weight: 600;
   color: var(--brand-primary);
 }
@@ -413,7 +414,7 @@ input, textarea, [contenteditable="true"] {
 .select-input:focus,
 .textarea:focus {
   border-color: var(--brand-primary);
-  box-shadow: 0 0 0 3px rgba(255, 107, 53, 0.12);
+  box-shadow: 0 0 0 3px rgba(47, 107, 255, 0.12);
 }
 
 .select-input {
@@ -596,9 +597,9 @@ input, textarea, [contenteditable="true"] {
 
 .radio-card.active {
   /* 设计图：选中时浅橘色背景 + 橘色边框 */
-  background: linear-gradient(135deg, rgba(255, 107, 53, 0.06) 0%, rgba(255, 107, 53, 0.02) 100%);
+  background: linear-gradient(135deg, rgba(47, 107, 255, 0.06) 0%, rgba(47, 107, 255, 0.02) 100%);
   border-color: var(--brand-border);
-  box-shadow: 0 2px 8px rgba(255, 107, 53, 0.08);
+  box-shadow: 0 2px 8px rgba(47, 107, 255, 0.08);
 }
 
 /* Hide native radio */
@@ -1071,7 +1072,7 @@ input[type="range"]::-moz-range-thumb {
   border-color: var(--brand-primary);
   border-bottom-color: #9a9a9a;
   box-shadow:
-    0 6px 14px rgba(255, 107, 53, 0.12),
+    0 6px 14px rgba(47, 107, 255, 0.12),
     0 3px 6px rgba(0, 0, 0, 0.08),
     inset 0 1px 0 rgba(255, 255, 255, 0.9);
   transform: translateY(-2px);
@@ -1446,7 +1447,7 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .wordbook-add-inline:hover:not(.disabled) {
-  background: #e55a2b;
+  background: #1f57eb;
 }
 
 .wordbook-add-inline.disabled {
@@ -1591,7 +1592,7 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .btn-accent:hover:not(:disabled) {
-  background: #e55a2b !important;
+  background: #1f57eb !important;
 }
 
 .btn-accent:disabled {
@@ -1675,7 +1676,7 @@ input[type="range"]::-moz-range-thumb {
 
 .llm-input:focus {
   border-color: var(--brand-primary);
-  box-shadow: 0 0 0 2px rgba(255, 107, 53, 0.15);
+  box-shadow: 0 0 0 2px rgba(47, 107, 255, 0.15);
 }
 
 .llm-input::placeholder {

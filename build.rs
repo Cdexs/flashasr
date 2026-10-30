@@ -4,6 +4,8 @@ fn main() {
     // 🔴 必须显式声明 rerun-if-changed：漏声明 ⇒ 改了 shim.cpp 却链接旧 .lib。
     println!("cargo:rerun-if-changed=native/llama_asr/shim.cpp");
     println!("cargo:rerun-if-changed=native/llama_asr/include");
+    // 程序图标（winres 编进 exe，托盘也用它）：改了图标要重新编进去。
+    println!("cargo:rerun-if-changed=assets/icons/app.ico");
     cc::Build::new()
         .cpp(true)
         .file("native/llama_asr/shim.cpp")
