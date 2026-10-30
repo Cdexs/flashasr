@@ -7,7 +7,7 @@
 
 > 方案 §8 P1：把识别服务从 voice-ime 搬到本仓库并能独立编译、测试通过；删 performance / accuracy / qwen-audio。
 > **搬法（主控 10-29 定）**：从 voice-ime `7c1e6ae` **复制**，voice-ime 原样不动（其 `main.rs` 有大量按源码逐字检查的测试，
-> 原地抽模块牵动面大；P3 输入法本就整块删除识别代码）。⚠️ 过渡期（P1~P3）两边同步修改。
+> 原地抽模块牵动面大；P3 输入法本就整块删除识别代码）。（P3 已完成：识别代码只在本仓库，不再两边同步。）
 
 | 单号 | 子项 | 状态 |
 | --- | --- | --- |
@@ -30,7 +30,7 @@
 | FLASH-P2-05 | 协议扩展：`feiyin.scene`（场景给输出优化）、`usage.speech_ms`、终稿 `wordbook_hits` / `learn_suggestions`、未配大模型时的提示字段、`POST /v1/profile/voiceprint/reset` | ✅ 冒烟：词表命中、speech_ms、未配大模型提示、声纹重置（401 无 key）全过 |
 | FLASH-P2-06 | 本机自动配对：首次运行自动建「本机」终端，配对信息写到当前用户目录（只本人可读），供输入法自动发现 | ✅ |
 | FLASH-P2-07 | 测试（子 agent）+ 端到端冒烟 + 文档 | ✅ 协议文档 / README 同步；前台 52 / 引擎 1540 全过 |
-| FLASH-P2-08 | **详细 API 文档**（Gavin 10-29「Flashasr 开发完毕，要生成一份详细的 api 文档，方便调用者查阅和接入开发」）：在 `docs/ASR-PROTOCOL.md` 基础上出完整接入文档 —— 连接与配对、鉴权、`run-task` 全部参数与默认值、结果 / 译文 / 逐字时间格式、错误码全表与处理建议、`/v1/status`、声纹接口、时序图、多语言调用示例（Python / JavaScript / Kotlin / Swift 片段）、版本兼容规则。flashasr 功能开发完毕后做 | 🔄 编写中（docs/API.md） |
+| FLASH-P2-08 | **详细 API 文档**（Gavin 10-29「Flashasr 开发完毕，要生成一份详细的 api 文档，方便调用者查阅和接入开发」）：在 `docs/ASR-PROTOCOL.md` 基础上出完整接入文档 —— 连接与配对、鉴权、`run-task` 全部参数与默认值、结果 / 译文 / 逐字时间格式、错误码全表与处理建议、`/v1/status`、声纹接口、时序图、多语言调用示例（Python / JavaScript / Kotlin / Swift 片段）、版本兼容规则。flashasr 功能开发完毕后做 | ✅ `docs/API.md`（`fc986e2`；Python 示例在 websockets 13 / 17 实跑通过，`e3888c1`） |
 
 ## 🔄 FLASH-P2b · 管理界面 + 安装包（Gavin 10-30「继续」）
 
@@ -55,9 +55,9 @@
 | FLASH-P3-A | 删本地引擎与模型：AsrModel 只留 FunAsrRealtime（直连阿里）+ FeiyinServer（连 flashasr）；删 asr_service 服务端 + 网关、本地实时 / performance / accuracy / qwen-audio、标点模型（拆出纯规则）、离线翻译（留方向判定）、VAD / 声纹 / llama / 对齐；在线 VAD 门控、接缝重判、本地标点、离线翻译回退去掉；有效时长改整段；设置界面去模型下拉多余项与模型下载提示、去「识别服务」页；Cargo 依赖与 build.rs 去模型部分。**不删任何目录**（vendor / patches / models / sherpa-onnx-lib 留到 P3-D 列清单确认）、不动 `src/main - 副本.rs`（未入库） | ✅ voice-ime `540e817` / `9b20542`；测试全过；macOS 待编译 |
 | FLASH-P3-B | 连 flashasr 补全：处理开关随请求传（输出优化 / 翻译 / ITN / 标点 / 繁简 / 去句末标点 / 场景）；收终稿译文、词库命中、学习建议、优化未做原因、`usage.speech_ms`；服务端已处理的文字本机不再重复处理；本机自动配对文件；连接码 `flash-asr://` | ✅ voice-ime + flashasr（finish-task 带翻译终值）；测试全过、冒烟通过；设置页「输出优化不要求本机 Key」并入 P3-C |
 | FLASH-P3-C | 首次使用连接向导（本机 flashasr 一键连 / 连接码 / 直连阿里 Key）+ 设置页连接方式；连 flashasr 时输出优化 / 翻译不要求本机 Key、显示服务端大模型状态（任务书 `collab/p3c-spec.md`）；本机需用户确认才连（Gavin 10-30） | ✅ voice-ime `3b840a0`，测试全过；待 Gavin 目视 |
-| FLASH-P3-D | 清理：目录清单（vendor/sherpa-onnx、vendor/llama-runtime、vendor/whisper-rs-sys、vendor/cmake、patches、sherpa-onnx-lib、models、`src/main - 副本.rs`）Gavin 确认后删；构建脚本 / 安装包 / macOS 脚本去模型运行库 | ⬜ |
+| FLASH-P3-D | 清理：目录清单（vendor/sherpa-onnx、vendor/llama-runtime、vendor/whisper-rs-sys、vendor/cmake、patches、sherpa-onnx-lib、models、`src/main - 副本.rs`）Gavin 确认后删；构建脚本 / 安装包 / macOS 脚本去模型运行库 | ✅ 模型唯一一份迁到 `FlashASR\models`（其余联接）；编译 / 打包依赖迁入本仓库（`394ba0d`）；清单 A 类 Gavin「A 删」已执行；B 类（编译输出约 52GB）出包前执行，见 `collab/cleanup-manifest.md` |
 | FLASH-P3-E | 直连阿里断句方式 | ✅ Gavin 10-30「直连阿里直接采用语义断句，这个不必要再测试了，以前测试过」⇒ 缺省改语义断句（voice-ime 配置两处同步） |
-| FLASH-P3-F | 测试 + 端测（本机两件套松手到上屏 ≤ 旧版 +20ms）+ 五文档 + 跨端交接 | ⬜ |
+| FLASH-P3-F | 测试 + 端测 + 文档 + 跨端交接 | ✅ 全量回归：voice-ime feiyin-ime 1253 / crash-reporter 62 / 集成 36 / src-tauri 114 / ui 147；flashasr 前台 58 / 引擎 1476 / 管理界面 31 / Python 客户端 45，全过；Gavin 10-30 端测「测试OK」 |
 
 ## 📌 Gavin 10-30 交代（长期有效）
 
