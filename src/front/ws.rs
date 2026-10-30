@@ -658,11 +658,14 @@ impl Conn {
                 match header["action"].as_str() {
                     Some("run-task") => self.run_task(ws, task_id, &v["payload"]).await,
                     Some("finish-task") => {
+                        // FLASH-P3-B：`finish-task` 可带 `parameters.translation_enabled`（说完时定的翻译开关，
+                        // 覆盖 `run-task` 的值；翻译热键可以在录音中途按下）。不带 ⇒ 沿用开始时的。
+                        let translate = v["payload"]["parameters"]["translation_enabled"].as_bool();
                         match &self.task {
                             Some(t) if t.id == task_id => self.shared.core.send(Frame::new(
                                 Kind::Finish,
                                 t.session,
-                                Vec::new(),
+                                crate::frame::finish_body(translate),
                             )),
                             _ => {
                                 return ws

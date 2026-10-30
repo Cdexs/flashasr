@@ -180,6 +180,13 @@ Authorization: Bearer <key>
 { "header": { "action": "finish-task", "task_id": "<同 run-task>", "streaming": "duplex" }, "payload": { "input": {} } }
 ```
 
+可选：`payload.parameters.translation_enabled`（布尔）——**说完时**定下的翻译开关，覆盖 `run-task` 里的值；不带 ⇒ 沿用 `run-task` 的。用于「录音中途才决定要翻译」的终端（翻译只在终稿阶段做，所以说完时决定不晚）：
+
+```json
+{ "header": { "action": "finish-task", "task_id": "<同 run-task>", "streaming": "duplex" },
+  "payload": { "input": {}, "parameters": { "translation_enabled": true } } }
+```
+
 `task_id` 对不上 / 没有进行中的识别 ⇒ `task-failed`（`InvalidParameter`，`no such task`），连接保持。发完后继续收事件，直到 `task-finished` / `task-failed`。
 
 ### 4.4 取消

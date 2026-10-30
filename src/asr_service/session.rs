@@ -12,7 +12,7 @@
 //! - S9 逐字时间：精解时间在「虚拟时间轴」（各派发片首尾相接，含补零）⇒ 按片映射换算成录音时间；
 //!   文字处理（去口水重复 / 繁简规整）改了字 ⇒ `char_times::transfer` 搬运；补不出的标 `estimated`。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::compose::{RemoteComposer, REMOTE_GEN};
@@ -71,6 +71,29 @@ fn known_end(times: &[Option<CharTime>]) -> f32 {
 /// - `audio_rx`：16k 单声道 PCM；发送端全部释放 = 终端说完（`Finish`）。
 /// - `cancel`：置位 = 取消（不出终稿）。
 /// - `emit`：推送结果（预览反复推、终稿最后推一次）。
+/// FLASH-P3-B：说完时的翻译开关（`translate_at_finish`）：未定 / 不翻 / 翻。
+pub(crate) const TRANSLATE_UNSET: u8 = 0;
+const TRANSLATE_OFF: u8 = 1;
+const TRANSLATE_ON: u8 = 2;
+
+pub(crate) fn translate_flag(on: bool) -> u8 {
+    if on {
+        TRANSLATE_ON
+    } else {
+        TRANSLATE_OFF
+    }
+}
+
+/// 终稿阶段最终用的翻译开关：说完时定了就用说完时的，否则用开始时 `run-task` 的。
+fn effective_translate(at_start: bool, at_finish: u8) -> bool {
+    match at_finish {
+        TRANSLATE_ON => true,
+        TRANSLATE_OFF => false,
+        _ => at_start,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_remote_session(
     engines: &RemoteEngines,
     slot: &AccEngine,
@@ -79,6 +102,7 @@ pub(crate) fn run_remote_session(
     params: &OpenParams,
     audio_rx: crossbeam_channel::Receiver<Vec<f32>>,
     cancel: Arc<AtomicBool>,
+    translate_at_finish: &AtomicU8,
     mut emit: impl FnMut(ResultPayload),
 ) -> RemoteOutcome {
     let model_dir = transcription::model_dir();
@@ -95,7 +119,7 @@ pub(crate) fn run_remote_session(
     let acc_terms = session_terms(&params.vocabulary);
     // S10：补标点跟终端参数（精解失败片的兜底打点也一样），不跟本机设置。
     let acc_punct_enabled = params.punctuation;
-    let opts = TextOpts {
+    let mut opts = TextOpts {
         itn: params.itn,
         punctuation: params.punctuation,
         script,
@@ -294,10 +318,17 @@ pub(crate) fn run_remote_session(
     };
     let text = text_normalizer::normalize_text_for_language(final_src.trim(), script);
     let times = char_times::transfer(&final_src, &src_times, &text);
+    // FLASH-P3-B：翻不翻以说完时为准（翻译热键可在录音中途按下）；音频通道已关，终端在关之前就写好了。
+    let translate = effective_translate(
+        params.translate,
+        translate_at_finish.load(Ordering::Acquire),
+    );
+    // FLASH-P0-513：开翻译时大模型一次做「优化 + 翻译」，原文不再单独过大模型。
+    opts.optimize = params.optimize && !translate;
     // S10：内置节点 + 终端三项参数；要了翻译 ⇒ 另出一份译文（失败不给）。
     let mut extras = text_stage::FinalExtras::default();
     let (text, times) = text_stage::apply_final_with(&text, &times, &opts, config, &mut extras);
-    let translation = if params.translate {
+    let translation = if translate {
         text_stage::translate(&text, config, &opts, params.optimize)
     } else {
         None
@@ -500,7 +531,7 @@ mod tests {
     /// S10 护栏 4（源码）：`session.rs` 生产区参数接线 + 节点调用次数。
     /// - `acc_punct_enabled = params.punctuation`（补标点跟终端参数，不跟本机 config）；
     /// - `apply_preview` 恰 1 次、`preview_tentative` 恰 1 次、`apply_final` 恰 1 次；
-    /// - `translate` 只出现在 `if params.translate` 分支内。
+    /// - `translate` 只出现在 `if translate` 分支内（FLASH-P3-B：`translate` = 说完时为准的开关）。
     #[test]
     fn s10_session_param_wiring_and_call_counts() {
         let src = include_str!("session.rs");
@@ -531,22 +562,22 @@ mod tests {
         );
         assert_eq!(n_final, 1, "{apply_final} 应恰 1 次，实际 {n_final}");
 
-        // 3. translate 只在 `if params.translate` 分支内：
-        //    找到 translate 调用行，向上回溯应能看到 `if params.translate`。
+        // 3. translate 只在 `if translate` 分支内：
+        //    找到 translate 调用行，向上回溯应能看到 `if translate`（说完时为准的开关）。
         let translate_call = concat!("text_stage::", "translate", "(");
         let lines: Vec<&String> = prod.iter().collect();
         let pos = lines
             .iter()
             .position(|l| l.contains(translate_call))
             .expect("生产区应有 translate 调用");
-        // 回溯 10 行找 if params.translate。
+        // 回溯 10 行找 if translate。
         let lo = pos.saturating_sub(10);
         let found = lines[lo..=pos]
             .iter()
-            .any(|l| l.contains("if") && l.contains("params.translate"));
+            .any(|l| l.contains(concat!("if ", "translate {")));
         assert!(
             found,
-            "{translate_call} 必须在 if params.translate 分支内（向上回溯 10 行未找到）"
+            "{translate_call} 必须在 if translate 分支内（向上回溯 10 行未找到）"
         );
     }
 
@@ -606,6 +637,11 @@ mod tests {
         );
         let compact: String = prod.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(compact.contains("optimize:params.optimize&&!params.translate,"));
+        // FLASH-P3-B：终稿前按说完时的翻译开关重算（翻译热键可在录音中途按下）。
+        assert!(compact.contains(
+            "lettranslate=effective_translate(params.translate,translate_at_finish.load(Ordering::Acquire),);"
+        ));
+        assert!(compact.contains("opts.optimize=params.optimize&&!translate;"));
         assert!(compact.contains("text_stage::translate(&text,config,&opts,params.optimize)"));
         let ts = include_str!("text_stage.rs");
         let body = ts
@@ -635,5 +671,17 @@ mod tests {
             vec!["飞音".to_string(), "LiveKit".to_string()]
         );
         assert!(wordbook_hits(&v, "").is_empty());
+    }
+
+    /// FLASH-P3-B：说完时定了就以说完时为准，没定沿用开始时。
+    #[test]
+    fn translate_decided_at_finish_overrides_start() {
+        assert!(!effective_translate(false, TRANSLATE_UNSET));
+        assert!(effective_translate(true, TRANSLATE_UNSET));
+        assert!(
+            effective_translate(false, translate_flag(true)),
+            "录音中途按了翻译键"
+        );
+        assert!(!effective_translate(true, translate_flag(false)));
     }
 }

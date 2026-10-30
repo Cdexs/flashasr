@@ -27,6 +27,7 @@ pub(crate) enum Kind {
     Hello = 0x01,
     Open = 0x02,
     Audio = 0x03,
+    /// 说完了。内容可空；FLASH-P3-B：可带 `{"translate": bool}`（说完时定下的翻译开关，见 [`finish_translate`]）。
     Finish = 0x04,
     Cancel = 0x05,
     Login = 0x06,
@@ -124,6 +125,27 @@ pub(crate) fn read_frame(r: &mut impl Read) -> io::Result<Option<Frame>> {
 }
 
 /// `Audio` 帧内容（i16 LE）⇒ f32 样本（与本机录音同口径 [-1, 1)）。奇数尾字节丢弃。
+/// FLASH-P3-B：`Finish` 帧内容里的翻译开关；空 / 解析不了 / 没这个键 ⇒ `None`（沿用开始时的）。
+pub(crate) fn finish_translate(body: &[u8]) -> Option<bool> {
+    if body.is_empty() {
+        return None;
+    }
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()?
+        .get("translate")?
+        .as_bool()
+}
+
+/// FLASH-P3-B：组 `Finish` 帧内容（`None` ⇒ 空，与旧行为一致）。
+pub(crate) fn finish_body(translate: Option<bool>) -> Vec<u8> {
+    match translate {
+        Some(t) => serde_json::json!({ "translate": t })
+            .to_string()
+            .into_bytes(),
+        None => Vec::new(),
+    }
+}
+
 pub(crate) fn pcm_i16le_to_f32(body: &[u8]) -> Vec<f32> {
     body.chunks_exact(2)
         .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
@@ -430,5 +452,18 @@ mod tests {
         assert_eq!(s.len(), 2, "奇数尾字节丢弃");
         assert_eq!(s[0], -1.0);
         assert!((s[1] - 32767.0 / 32768.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn finish_translate_roundtrip() {
+        assert_eq!(finish_translate(&finish_body(Some(true))), Some(true));
+        assert_eq!(finish_translate(&finish_body(Some(false))), Some(false));
+        assert_eq!(
+            finish_translate(&finish_body(None)),
+            None,
+            "空内容 = 沿用开始时"
+        );
+        assert_eq!(finish_translate(b"{}"), None);
+        assert_eq!(finish_translate(b"garbage"), None);
     }
 }

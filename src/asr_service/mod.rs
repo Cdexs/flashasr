@@ -19,7 +19,7 @@ mod transport;
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 
@@ -142,6 +142,9 @@ fn end_with(writer: &Writer, session: u64, error: &str) {
 struct Live {
     audio_tx: Option<crossbeam_channel::Sender<Vec<f32>>>,
     cancel: Arc<AtomicBool>,
+    /// FLASH-P3-B：说完时终端定下的「要不要翻译」（`session::TRANSLATE_*`）。翻译热键可以在录音中途才按，
+    /// 开始时不知道 ⇒ `finish-task` 可带 `translation_enabled` 覆盖 `run-task` 的值（终稿阶段才用到）。
+    translate_at_finish: Arc<AtomicU8>,
     handle: JoinHandle<()>,
 }
 
@@ -201,8 +204,13 @@ fn serve_conn(conn: transport::Conn, runtime_config: &Arc<RwLock<AppConfig>>) {
                 }
             }
             // 说完了：关音频通道 ⇒ 预览线程收尾 ⇒ 会话出终稿后自己发 End。
+            // FLASH-P3-B：先记下说完时的翻译开关，再关通道（会话在通道关闭之后才读它）。
             Kind::Finish => {
                 if let Some(s) = live.get_mut(&f.session) {
+                    if let Some(t) = frame::finish_translate(&f.body) {
+                        s.translate_at_finish
+                            .store(session::translate_flag(t), Ordering::Release);
+                    }
                     s.audio_tx = None;
                 }
             }
@@ -267,8 +275,10 @@ fn open_session(
     let config = crate::clone_runtime_config(runtime_config);
     let (audio_tx, audio_rx) = crossbeam_channel::bounded::<Vec<f32>>(AUDIO_QUEUE);
     let cancel = Arc::new(AtomicBool::new(false));
+    let translate_at_finish = Arc::new(AtomicU8::new(session::TRANSLATE_UNSET));
     let handle = {
         let (writer, cancel) = (Arc::clone(writer), Arc::clone(&cancel));
+        let translate_at_finish = Arc::clone(&translate_at_finish);
         std::thread::Builder::new()
             .name(format!("asr-remote-{id}"))
             .spawn(move || {
@@ -290,6 +300,7 @@ fn open_session(
                     &params,
                     audio_rx,
                     cancel,
+                    &translate_at_finish,
                     |r| send(&writer, &Frame::json(Kind::Result, id, &r)),
                 );
                 // FLASH-P0-511：正常说完 ⇒ 该终端声纹落盘；被取消（含吊销踢线）⇒ 不落盘、丢掉内存那份。
@@ -323,6 +334,7 @@ fn open_session(
     Ok(Live {
         audio_tx: Some(audio_tx),
         cancel,
+        translate_at_finish,
         handle,
     })
 }

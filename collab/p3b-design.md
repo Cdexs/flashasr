@@ -30,7 +30,8 @@
 2. 词库命中计数：用服务端 `wordbook_hits`（不再本机重算）。
 3. 自动学习：`learn_suggestions` 走现有大模型学习建议的同一入口（阈值规则不变）。
 4. 使用统计：`speech_ms` 用服务端值；缺 ⇒ 整段时长。
-5. `optimization_skipped == "llm_failed"` ⇒ 沿用 FormatFailed 浮层提示；`"llm_not_configured"` ⇒ 一次性提示「识别服务没有配置大模型，输出优化已跳过」（i18n 三份）。
+5. `optimization_skipped == "llm_failed"` ⇒ 沿用 FormatFailed 浮层提示；`"llm_not_configured"` ⇒ 只记日志、不弹窗（每句都弹会打扰），改由设置页「输出优化」旁显示服务端大模型状态（P3-C）。
+6. **翻译开关以说完时为准**（实现时发现：翻译热键可在录音中途按下）：`run-task` 发开始时的值，`finish-task` 带 `parameters.translation_enabled` 终值；flashasr 终稿阶段按终值决定翻译与「原文是否单独过大模型」（协议 §4.3）。
 
 直连阿里路径不变（输入法本机规则处理 + 自配大模型）。
 
