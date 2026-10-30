@@ -38,6 +38,7 @@ fn main() {
             server::server_reset_voiceprint,
             server::server_sessions,
             server::open_folder,
+            server::open_models_download,
             server::app_info,
             llm::llm_get,
             llm::llm_save,

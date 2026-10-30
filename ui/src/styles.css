@@ -729,6 +729,68 @@ input, textarea, [contenteditable="true"] {
   white-space: nowrap;
 }
 
+/* MODELS-PACK：模型缺失提示卡（沿用上方 asr-model-alert 版式）—— 步骤列表 / 可点链接 / 缺失清单 */
+.models-steps {
+  margin: 0 0 14px;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #92400e;
+}
+
+/* 地址 / 路径要能看全（复制前先核对）：允许折行，不截断。 */
+.asr-model-path-full {
+  white-space: normal;
+  word-break: break-all;
+  overflow: visible;
+  line-height: 1.5;
+}
+
+.asr-model-field:has(.asr-model-stack) {
+  align-items: flex-start;
+}
+
+.asr-model-field:has(.asr-model-stack) .asr-model-label {
+  padding-top: 6px;
+}
+
+/* 地址在上整行显示，操作按钮在下。 */
+.asr-model-stack {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.asr-model-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.models-missing-toggle {
+  margin-top: 10px;
+  padding: 0;
+  height: auto;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.asr-model-link {
+  color: var(--brand-primary);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.asr-model-link:hover {
+  text-decoration: underline;
+}
+
+.models-missing-list {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--system-text-tertiary);
+  word-break: break-all;
+}
+
 /* === Buttons（Fluent 风格） === */
 .btn {
   display: inline-flex;

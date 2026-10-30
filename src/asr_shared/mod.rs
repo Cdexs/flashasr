@@ -4,6 +4,7 @@
 //!（与词库、使用统计同规则），**不进 `config.toml`**（设计 §8.8：用户升级可能整份替换配置）。
 
 pub mod control;
+pub mod models;
 pub mod pairing;
 pub mod remote;
 pub mod settings;

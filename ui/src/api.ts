@@ -29,6 +29,11 @@ export interface Overview {
   llm_configured: boolean;
   load_error: string;
   model_dir: string;
+  /** 缺文件的模型文件夹（空 = 模型都在）。 */
+  missing_models: string[];
+  models_download_url: string;
+  /** 程序文件夹（模型包解压到这里，包里自带 models 一层）。 */
+  app_dir: string;
   lan: string;
   fingerprint: string;
   online_count: number;

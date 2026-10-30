@@ -27,6 +27,7 @@
 - 管理界面：`cd ui && npm ci && npm run build`，再 `cd src-tauri && cargo build --features custom-protocol`；把 `flashasr-ui.exe` 放到 `flashasr.exe` 旁边（界面的数据目录 = 程序所在目录）。
 - 安装包：`installer/flashasr.iss`（Inno Setup 6；从 `Publish/` 取产物；只按用户安装）。
 - 运行目录需要：模型目录 `models/`、运行库 DLL（sherpa-onnx / onnxruntime / llama.cpp / CTranslate2 / VC++）、规则文件 `*-rules.toml`。
+- **模型包**（安装包不含模型）：GitHub Release [`models-v1`](https://github.com/Cdexs/flashasr/releases/tag/models-v1)，7z 三个分卷（约 4.3GB），用 7-Zip / Bandizip / WinRAR 打开 `.001` 解压到程序文件夹即得 `models\`。模型没放好时管理界面「服务」页会显示下载地址与步骤。清单在 `src/asr_shared/models.rs`（文件夹名 / 文件名改动须与模型包、引擎同步）；打包命令见 `logs/20261030.md`「MODELS-PACK」。
 - 无界面配对：服务运行时执行 `flashasr --add-terminal`，打印连接码。
 - **提交 / 推送前的隐私泄露检测（必装，每个 clone 一次）**：`git config core.hooksPath scripts/git-hooks`。
   提交时扫新增内容（密钥 / 凭证 / 邮箱等），推送时扫整段待推提交；按路径直接拒绝配置文件、日志、数据库、声纹、

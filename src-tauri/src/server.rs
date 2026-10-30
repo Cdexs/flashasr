@@ -53,6 +53,12 @@ pub struct Overview {
     pub load_error: String,
     /// 模型目录（界面显示路径 + 「打开文件夹」）。
     pub model_dir: String,
+    /// MODELS-PACK：缺文件的模型文件夹（空 = 模型都在）。非空 ⇒ 界面显示下载与放置步骤。
+    pub missing_models: Vec<String>,
+    /// MODELS-PACK：模型包下载页（`asr_shared::models::MODELS_DOWNLOAD_URL`，界面显示与复制都用这一份）。
+    pub models_download_url: String,
+    /// MODELS-PACK：模型包解压到哪里（程序文件夹；包里自带 `models\` 一层）。
+    pub app_dir: String,
     /// 内网 `地址:端口`（自动）。
     pub lan: String,
     pub fingerprint: String,
@@ -143,6 +149,9 @@ pub fn server_overview() -> Result<Overview, String> {
         llm_configured: s.is_some_and(|s| s.llm_configured),
         load_error: s.map(|s| s.load_error.clone()).unwrap_or_default(),
         model_dir: asr_shared::data_dir().join("models").display().to_string(),
+        missing_models: asr_shared::models::missing_models(&asr_shared::data_dir().join("models")),
+        models_download_url: asr_shared::models::MODELS_DOWNLOAD_URL.to_string(),
+        app_dir: asr_shared::data_dir().display().to_string(),
         lan: settings.lan_endpoint().unwrap_or_default(),
         fingerprint: s
             .map(|s| s.fingerprint.clone())
@@ -272,7 +281,10 @@ pub fn server_sessions(terminal_id: String) -> Result<Vec<SessionRow>, String> {
 pub fn open_folder(kind: String) -> Result<(), String> {
     let dir = asr_shared::data_dir();
     let dir = if kind == "models" {
-        dir.join("models")
+        // 模型还没放 ⇒ 文件夹可能不存在：先建好再打开（用户把模型放进去即可）。
+        let d = dir.join("models");
+        let _ = std::fs::create_dir_all(&d);
+        d
     } else {
         dir
     };
@@ -280,6 +292,17 @@ pub fn open_folder(kind: String) -> Result<(), String> {
     let r = std::process::Command::new("explorer").arg(&dir).spawn();
     #[cfg(target_os = "macos")]
     let r = std::process::Command::new("open").arg(&dir).spawn();
+    r.map(|_| ()).map_err(|_| ERR_IO.to_string())
+}
+
+/// MODELS-PACK：用默认浏览器打开模型包下载页。只开固定地址（不收前端传来的网址）。
+#[tauri::command]
+pub fn open_models_download() -> Result<(), String> {
+    let url = asr_shared::models::MODELS_DOWNLOAD_URL;
+    #[cfg(target_os = "windows")]
+    let r = std::process::Command::new("explorer").arg(url).spawn();
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg(url).spawn();
     r.map(|_| ()).map_err(|_| ERR_IO.to_string())
 }
 

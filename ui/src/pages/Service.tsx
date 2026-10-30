@@ -21,6 +21,20 @@ const ServicePage: React.FC<Props> = ({ t, ov, loadFailed, refresh }) => {
   const [wanDirty, setWanDirty] = useState(false);
   const [wanSaved, setWanSaved] = useState(false);
   const [showDetail, setShowDetail] = useState(false);
+  // MODELS-PACK：刚复制的是哪一项（下载地址 / 解压目录），按钮短暂显示「已复制」。
+  const [copied, setCopied] = useState<'url' | 'dir' | null>(null);
+  const [showMissing, setShowMissing] = useState(false);
+
+  const copy = async (text: string, which: 'url' | 'dir') => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(which);
+      setTimeout(() => setCopied(null), 1500);
+    } catch (e) {
+      console.error('Copy failed:', e);
+    }
+  };
+  const openDownload = () => invoke('open_models_download').catch(() => {});
 
   useEffect(() => {
     if (ov && !wanDirty) {
@@ -80,6 +94,9 @@ const ServicePage: React.FC<Props> = ({ t, ov, loadFailed, refresh }) => {
   const hintStyle: React.CSSProperties = { fontSize: '13px', color: 'var(--system-text-tertiary)', margin: '12px 0 0', lineHeight: 1.6 };
   const lineStyle: React.CSSProperties = { fontSize: '15px', lineHeight: 1.8, margin: '0 0 8px' };
   const live = state !== 'stopped' && state !== 'starting';
+  // MODELS-PACK：模型没放好 ⇒ 显示下载与放置步骤（不论服务开没开），通用的「模型加载失败」提示让位。
+  const missing = ov?.missing_models ?? [];
+  const modelsMissing = missing.length > 0;
 
   return (
     <div className="settings-page">
@@ -94,7 +111,53 @@ const ServicePage: React.FC<Props> = ({ t, ov, loadFailed, refresh }) => {
             {t.svc_status_label}
             <strong style={{ color: stateColor[state] }}>{stateLabel[state]}</strong>
           </p>
-          {stateHint[state] && <p style={hintStyle}>{stateHint[state]}</p>}
+          {stateHint[state] && !(modelsMissing && state === 'load_failed') && <p style={hintStyle}>{stateHint[state]}</p>}
+          {modelsMissing && ov && (
+            <div className="asr-model-alert" data-testid="models-missing">
+              <div className="asr-model-alert-title">{t.models_missing_title}</div>
+              <ol className="models-steps">
+                <li>{t.models_step_download}</li>
+                <li>{t.models_step_extract}</li>
+                <li>{t.models_step_restart}</li>
+              </ol>
+              <div className="asr-model-field">
+                <span className="asr-model-label">{t.models_download_label}</span>
+                <div className="asr-model-path-row asr-model-stack">
+                  <a
+                    className="asr-model-path asr-model-path-full asr-model-link"
+                    href={ov.models_download_url}
+                    title={ov.models_download_url}
+                    data-testid="models-url"
+                    onClick={(e) => { e.preventDefault(); openDownload(); }}
+                  >
+                    {ov.models_download_url}
+                  </a>
+                  <div className="asr-model-actions">
+                    <button className="btn btn-primary btn-accent btn-sm" onClick={openDownload}>{t.models_open_page}</button>
+                    <button className="btn btn-secondary btn-sm" onClick={() => copy(ov.models_download_url, 'url')}>
+                      {copied === 'url' ? t.copied : t.copy}
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div className="asr-model-field">
+                <span className="asr-model-label">{t.models_extract_label}</span>
+                <div className="asr-model-path-row asr-model-stack">
+                  <span className="asr-model-path asr-model-path-full" title={ov.app_dir} data-testid="models-extract-dir">{ov.app_dir}</span>
+                  <div className="asr-model-actions">
+                    <button className="btn btn-secondary btn-sm" onClick={() => invoke('open_folder', { kind: 'app' }).catch(() => {})}>{t.open_folder}</button>
+                    <button className="btn btn-secondary btn-sm" onClick={() => copy(ov.app_dir, 'dir')}>
+                      {copied === 'dir' ? t.copied : t.copy}
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <button className="btn btn-link models-missing-toggle" onClick={() => setShowMissing(!showMissing)}>{t.models_missing_detail}</button>
+              {showMissing && (
+                <p className="models-missing-list">{fill(t.models_missing_list, { list: missing.join('、') })}</p>
+              )}
+            </div>
+          )}
           {state === 'load_failed' && ov?.load_error && (
             <div style={{ marginTop: '8px' }}>
               <button className="btn btn-link" onClick={() => setShowDetail(!showDetail)}>{t.load_error_detail}</button>
