@@ -54,7 +54,7 @@
 | --- | --- | --- |
 | FLASH-P3-A | 删本地引擎与模型：AsrModel 只留 FunAsrRealtime（直连阿里）+ FeiyinServer（连 flashasr）；删 asr_service 服务端 + 网关、本地实时 / performance / accuracy / qwen-audio、标点模型（拆出纯规则）、离线翻译（留方向判定）、VAD / 声纹 / llama / 对齐；在线 VAD 门控、接缝重判、本地标点、离线翻译回退去掉；有效时长改整段；设置界面去模型下拉多余项与模型下载提示、去「识别服务」页；Cargo 依赖与 build.rs 去模型部分。**不删任何目录**（vendor / patches / models / sherpa-onnx-lib 留到 P3-D 列清单确认）、不动 `src/main - 副本.rs`（未入库） | ✅ voice-ime `540e817` / `9b20542`；测试全过；macOS 待编译 |
 | FLASH-P3-B | 连 flashasr 补全：处理开关随请求传（输出优化 / 翻译 / ITN / 标点 / 繁简 / 去句末标点 / 场景）；收终稿译文、词库命中、学习建议、优化未做原因、`usage.speech_ms`；服务端已处理的文字本机不再重复处理；本机自动配对文件；连接码 `flash-asr://` | ✅ voice-ime + flashasr（finish-task 带翻译终值）；测试全过、冒烟通过；设置页「输出优化不要求本机 Key」并入 P3-C |
-| FLASH-P3-C | 首次使用连接向导（本机 flashasr 一键连 / 连接码 / 直连阿里 Key）+ 设置页连接方式；连 flashasr 时输出优化 / 翻译不要求本机 Key、显示服务端大模型状态（任务书 `collab/p3c-spec.md`） | 🔄 派实现 agent |
+| FLASH-P3-C | 首次使用连接向导（本机 flashasr 一键连 / 连接码 / 直连阿里 Key）+ 设置页连接方式；连 flashasr 时输出优化 / 翻译不要求本机 Key、显示服务端大模型状态（任务书 `collab/p3c-spec.md`）；本机需用户确认才连（Gavin 10-30） | ✅ voice-ime `3b840a0`，测试全过；待 Gavin 目视 |
 | FLASH-P3-D | 清理：目录清单（vendor/sherpa-onnx、vendor/llama-runtime、vendor/whisper-rs-sys、vendor/cmake、patches、sherpa-onnx-lib、models、`src/main - 副本.rs`）Gavin 确认后删；构建脚本 / 安装包 / macOS 脚本去模型运行库 | ⬜ |
 | FLASH-P3-E | 直连阿里：「2 秒停顿断句」vs「语义断句」真实录音对比后定缺省 | ⬜ |
 | FLASH-P3-F | 测试 + 端测（本机两件套松手到上屏 ≤ 旧版 +20ms）+ 五文档 + 跨端交接 | ⬜ |
