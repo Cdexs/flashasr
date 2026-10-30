@@ -46,6 +46,9 @@ pub struct EngineStatus {
     /// FLASH-P2b-01：本地实时模型加载失败的原因（空 = 没失败：加载中或已加载）。
     #[serde(default)]
     pub load_error: String,
+    /// 同时识别路数上限（引擎模型加载完时按空闲显存算；未加载 / 旧引擎 ⇒ 0）。
+    #[serde(default)]
+    pub max_sessions: usize,
 }
 /// 引擎掉线时进行中会话的错误码（`ws.rs` `end_code` 映射为 `EngineRestarted`）。
 pub const ERR_ENGINE_RESTARTED: &str = "engine_restarted";
@@ -59,6 +62,9 @@ struct Inner {
     tx: Mutex<Option<mpsc::Sender<Frame>>>,
     routes: Routes,
     status: Mutex<EngineStatus>,
+    /// 已登录的连接：连接号 ⇒ 终端编号。引擎重启后按它补报 `Login`（引擎侧在线统计不少算）。
+    /// 锁顺序：先 `logins` 后 `tx`（[`CoreLink::login`] / [`go_online`] 一致，补报与新登录不重不漏）。
+    logins: Mutex<HashMap<u64, String>>,
 }
 
 pub struct CoreLink {
@@ -77,6 +83,7 @@ impl CoreLink {
             tx: Mutex::new(None),
             routes: Arc::default(),
             status: Mutex::default(),
+            logins: Mutex::default(),
         });
         let i2 = inner.clone();
         std::thread::Builder::new()
@@ -108,6 +115,26 @@ impl CoreLink {
     /// 引擎最近一次报的状态（不在线 ⇒ 全默认）。
     pub fn engine_status(&self) -> EngineStatus {
         lock(&self.inner.status).clone()
+    }
+
+    /// 正在进行的识别路数（已发 `Open`、还没收到 `End` / 没被关的会话）。
+    pub fn active_sessions(&self) -> usize {
+        lock(&self.inner.routes).len()
+    }
+
+    /// 连接 `conn` 上的终端通过鉴权：记下并告诉引擎（统计「登录」）。引擎不在线 ⇒ 只记下，上线后补报。
+    pub fn login(&self, conn: u64, terminal_id: &str) {
+        let mut logins = lock(&self.inner.logins);
+        logins.insert(conn, terminal_id.to_string());
+        let _ = self.try_send(login_frame(conn, terminal_id));
+    }
+
+    /// 连接 `conn` 断开：撤记录并告诉引擎（统计「退出」）。
+    pub fn logout(&self, conn: u64) {
+        let mut logins = lock(&self.inner.logins);
+        if logins.remove(&conn).is_some() {
+            let _ = self.try_send(Frame::new(Kind::Logout, conn, Vec::new()));
+        }
     }
 
     pub fn open(&self, params: &OpenParams) -> (u64, UnboundedReceiver<Frame>) {
@@ -219,7 +246,7 @@ fn serve_engine(child: &mut Child, token: &str, inner: &Arc<Inner>) -> io::Resul
                 }
             }
         })?;
-    *lock(&inner.tx) = Some(tx);
+    go_online(inner, tx);
     log::info!("[flashasr] 已连上引擎（{endpoint}）");
     // FLASH-P2-04：之后的标准输出是状态行；读到引擎退出（EOF）为止。
     let i2 = inner.clone();
@@ -233,6 +260,24 @@ fn serve_engine(child: &mut Child, token: &str, inner: &Arc<Inner>) -> io::Resul
             }
         })?;
     read_loop(reader, &inner.routes)
+}
+
+/// 统计「登录」帧：会话号字段放连接号，正文是终端编号（§16.4）。
+fn login_frame(conn: u64, terminal_id: &str) -> Frame {
+    Frame::new(Kind::Login, conn, terminal_id.as_bytes().to_vec())
+}
+
+/// 引擎连上：先把在线终端按记录补报 `Login`（新引擎的统计从零开始，不补会少算在线终端），再开放写队列。
+/// 补报与开放在 `logins` 锁内一次做完 ⇒ 期间新登录的连接要么已在记录里被补报，要么等锁放开后自己发，不重不漏。
+fn go_online(inner: &Inner, tx: mpsc::Sender<Frame>) {
+    let logins = lock(&inner.logins);
+    for (&conn, terminal_id) in logins.iter() {
+        let _ = tx.send(login_frame(conn, terminal_id));
+    }
+    *lock(&inner.tx) = Some(tx);
+    if !logins.is_empty() {
+        log::info!("[flashasr] 已向引擎补报 {} 个在线连接", logins.len());
+    }
 }
 
 fn parse_status(line: &str) -> Option<EngineStatus> {
@@ -337,6 +382,7 @@ mod tests {
                 tx: Mutex::new(None),
                 routes: Arc::default(),
                 status: Mutex::default(),
+                logins: Mutex::default(),
             }),
             next: AtomicU64::new(1),
         };
@@ -357,6 +403,7 @@ mod tests {
             tx: Mutex::new(None),
             routes: Arc::default(),
             status: Mutex::default(),
+            logins: Mutex::default(),
         };
         let mut rxs = Vec::new();
         for sid in 1..=3u64 {
@@ -392,7 +439,8 @@ mod tests {
             Some(EngineStatus {
                 local_realtime: false,
                 llm: true,
-                load_error: "no model".into()
+                load_error: "no model".into(),
+                ..Default::default()
             })
         );
         assert_eq!(
@@ -401,5 +449,80 @@ mod tests {
         );
         assert_eq!(parse_status("hello"), None);
         assert_eq!(parse_status("FLASHASR_STATUS {bad"), None);
+        assert_eq!(
+            parse_status(r#"FLASHASR_STATUS {"local_realtime":true,"max_sessions":5}"#)
+                .map(|s| s.max_sessions),
+            Some(5)
+        );
+    }
+
+    fn offline_link() -> CoreLink {
+        CoreLink {
+            inner: Arc::new(Inner {
+                tx: Mutex::new(None),
+                routes: Arc::default(),
+                status: Mutex::default(),
+                logins: Mutex::default(),
+            }),
+            next: AtomicU64::new(1),
+        }
+    }
+
+    fn drain(rx: &mpsc::Receiver<Frame>) -> Vec<(Kind, u64, Vec<u8>)> {
+        rx.try_iter().map(|f| (f.kind, f.session, f.body)).collect()
+    }
+
+    /// 引擎重连 ⇒ 按记录补报每个已登录连接的 `Login`；已退出的不补；之后的登录 / 退出直接发。
+    #[test]
+    fn reconnect_replays_logins() {
+        let link = offline_link();
+        // 引擎不在线时登录 / 退出：只改记录。
+        link.login(1, "T1");
+        link.login(2, "T2");
+        link.login(3, "T3");
+        link.logout(2);
+        let (tx, rx) = mpsc::channel();
+        go_online(&link.inner, tx);
+        let mut got = drain(&rx);
+        got.sort_by_key(|g| g.1);
+        assert_eq!(
+            got,
+            vec![
+                (Kind::Login, 1, b"T1".to_vec()),
+                (Kind::Login, 3, b"T3".to_vec())
+            ]
+        );
+        assert!(link.engine_up());
+        link.login(4, "T4");
+        link.logout(1);
+        link.logout(1); // 重复退出不重复发
+        assert_eq!(
+            drain(&rx),
+            vec![
+                (Kind::Login, 4, b"T4".to_vec()),
+                (Kind::Logout, 1, Vec::new())
+            ]
+        );
+        // 引擎再掉线、再连上：只补报仍在线的 3、4。
+        *lock(&link.inner.tx) = None;
+        let (tx, rx) = mpsc::channel();
+        go_online(&link.inner, tx);
+        let mut ids: Vec<u64> = drain(&rx).into_iter().map(|g| g.1).collect();
+        ids.sort();
+        assert_eq!(ids, vec![3, 4]);
+    }
+
+    /// 正在进行的识别路数 = 路由表里的会话数。
+    #[test]
+    fn active_sessions_counts_routes() {
+        let link = offline_link();
+        assert_eq!(link.active_sessions(), 0);
+        for sid in [7u64, 8] {
+            let (tx, _rx) = unbounded_channel();
+            lock(&link.inner.routes).insert(sid, tx);
+        }
+        assert_eq!(link.active_sessions(), 2);
+        link.close(7);
+        assert_eq!(link.active_sessions(), 1);
     }
 }

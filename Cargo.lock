@@ -873,7 +873,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "atomic-write-file",
- "base64 0.22.1",
  "cc",
  "chrono",
  "crossbeam-channel",
@@ -901,7 +900,6 @@ dependencies = [
  "tokio-tungstenite",
  "toml 0.8.2",
  "tray-icon",
- "tungstenite",
  "windows",
  "winres",
  "zhconv",
@@ -3529,13 +3527,9 @@ dependencies = [
  "httparse",
  "log",
  "rand",
- "rustls",
- "rustls-pki-types",
  "sha1",
  "thiserror 2.0.18",
- "url",
  "utf-8",
- "webpki-roots 0.26.11",
 ]
 
 [[package]]

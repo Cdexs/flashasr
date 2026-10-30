@@ -1,6 +1,6 @@
 //! LOCAL-RT-ENGINE-239-A / DEC-067 / STREAM-SV-463：本地实时预览 ASR。
 //!
-//! 与 [`crate::transcription::qwen_inference::transcribe_streaming_realtime`] **平行**的本地实现：
+//! 与原在线流式 `qwen_inference::transcribe_streaming_realtime`（flashasr 已删）**平行**的本地实现：
 //! 不走 WebSocket，直接处理实时音频 chunk。
 //!
 //! STREAM-SV-463（Gavin 2026-10-03「好，那替换吧」，DEC-100）：预览模型由三语流式 paraformer
@@ -1467,7 +1467,7 @@ impl SegmentGate {
     }
 }
 
-/// 本地真流式转录（边收音频边解码），与 `transcribe_streaming_realtime` 平行。
+/// 本地真流式转录（边收音频边解码），与原在线 `transcribe_streaming_realtime` 平行。
 ///
 /// # 参数
 /// - `chunk_rx`：实时音频块（16kHz f32 单声道）；channel 关闭 = 录音结束

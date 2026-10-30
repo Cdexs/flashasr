@@ -101,6 +101,10 @@ const STATUS_PREFIX: &str = "FLASHASR_STATUS ";
 /// FLASH-P2b-01：本地实时模型加载结果 `(已加载, 失败原因)`（重载配置后重报状态要带上它）。
 static LOCAL_STATE: Mutex<(bool, String)> = Mutex::new((false, String::new()));
 
+/// 同时识别路数上限（`/v1/status` `max_sessions`）：模型加载完时按空闲显存算一次
+///（[`transcription::AccEngine::remote_capacity`]）；没加载完 / 加载失败 ⇒ 0。
+static MAX_SESSIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// 「配了大模型」= 开关开且地址、密钥都填了（缺省配置开关是开的但没填，不能算可用）。
 fn llm_configured(config: &AppConfig) -> bool {
     config.llm.enabled
@@ -119,6 +123,7 @@ fn report_status(llm: bool) {
         "local_realtime": local_realtime,
         "llm": llm,
         "load_error": load_error,
+        "max_sessions": MAX_SESSIONS.load(Ordering::Relaxed),
     });
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "{STATUS_PREFIX}{line}").and_then(|_| out.flush());
@@ -168,6 +173,12 @@ fn load_local_realtime(config: AppConfig) {
                 t0.elapsed().as_secs_f32(),
                 model_dir.display()
             );
+            // 刚加载完、还没开远程通道 ⇒ 此刻空闲显存就是可分给终端的全部。
+            let max = transcription::remote_engines()
+                .map(|e| e.acc.remote_capacity())
+                .unwrap_or(0);
+            MAX_SESSIONS.store(max, Ordering::Relaxed);
+            log::info!("[flashasr] max concurrent sessions: {max}");
             set_local_state(true, String::new());
             report_status(llm_configured(&config));
             t

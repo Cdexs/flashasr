@@ -164,7 +164,7 @@ pub(crate) struct OpenParams {
     /// 终端内部编号（网关鉴权后填；统计库 `terminal_id`，S5）。
     #[serde(default)]
     pub terminal_id: String,
-    /// 客户端追加词表（阿里协议 `vocabulary`）；追加在本机词库之后。
+    /// 终端词表（阿里协议 `vocabulary`）：会话词表**只用**终端带来的这份，不读服务端本机词库（FLASH-P0-509）。
     #[serde(default)]
     pub vocabulary: Vec<String>,
     /// S10：数字规整（阿里 `inverse_text_normalization_enabled`，默认开）。

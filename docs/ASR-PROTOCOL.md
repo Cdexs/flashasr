@@ -4,6 +4,8 @@
 > 本文与前台程序 `flashasr`（`src/front/`）逐条对应；两者不一致时以程序行为为准，并回来改本文。
 > 参考实现：`tools/asr-client/feiyin_asr_client.py`（Python，可直接跑通全流程，见 §9）。
 > 版本：v1（2026-10-17 一期；2026-10-29 flashasr 0.1.0 增补 §1.5、§4.1 场景、§5.2 终稿扩展、§5.4 `speech_ms` / `EngineRestarted`、§5.5 HTTP 接口，均向后兼容）。
+>
+> **完整接入文档见 `docs/API.md`**（含各语言示例）；本文与 API.md 不一致时**以 API.md 为准**。
 
 ## 0. 一句话
 
@@ -27,7 +29,7 @@ flash-asr://pair?v=1&lan=192.168.1.5:7860&wan=asr.example.com:7860&key=ABCDEFGHI
 | 字段 | 必有 | 说明 |
 | --- | --- | --- |
 | `v` | ✅ | 协议版本，当前只认 `1`；不是 `1` ⇒ 拒绝并提示升级 |
-| `lan` | 二选一 | 内网地址 `主机:端口` |
+| `lan` | 二选一 | 内网地址 `主机:端口`。**字段总会出现，但值可能为空**（服务端取不到本机内网地址时）⇒ 当作没有内网地址，只用 `wan` |
 | `wan` | 二选一 | 外网地址 `主机:端口`（服务端没配外网时不出现） |
 | `key` | ✅ | 终端凭证：RFC 4648 base32（大写、无填充），16 字节随机数 ⇒ 26 字符 |
 | `fp` | ✅ | 服务端证书指纹：证书 DER 的 SHA-256，**小写**十六进制 64 字符 |
@@ -44,8 +46,8 @@ flash-asr://pair?v=1&lan=192.168.1.5:7860&wan=asr.example.com:7860&key=ABCDEFGHI
 
 ### 1.3 key 的生命周期（终端需要知道的部分）
 
-- 新 key **10 分钟内**必须完成首次识别请求（§4.1），否则过期（`KeyExpired`）⇒ 让用户重新添加终端。
-- 首次识别请求时 key **绑定本机 `device_id`**；之后同一 key 只能由这台设备使用（换设备 ⇒ `DeviceMismatch`）。
+- 新 key **10 分钟内**必须完成首次识别请求（§4.1），否则过期（`KeyExpired`）⇒ 让用户重新添加终端。服务端会定期清理过期的 key，**清理之后再用它报的是 `InvalidKey`**（不再是 `KeyExpired`），两者处理相同。
+- 首次识别请求时 key **绑定本机 `device_id`**；之后同一 key 只能由这台设备使用（换设备 ⇒ `DeviceMismatch`）。**本机终端（§1.5）例外：不绑设备**，同一台电脑上换 `device_id` 也照常可用。
 - 服务端可随时撤销（`KeyRevoked`），撤销时在线连接立即断开。
 - 以上三种错误终端都应提示「需要重新配对」，**不要自动重试**。
 
@@ -73,6 +75,7 @@ flashasr 每次启动都会保证有一个「本机终端」，并把它的连�
 
 - `uri` 按 §1.1 解析即可，地址固定 `127.0.0.1`。
 - 本机终端的 key **永不过期**，但**只接受回环地址（127.0.0.1 / ::1）来的连接**；从别的机器用它连 ⇒ `InvalidKey`。
+- 本机终端**不绑设备**（§1.3 的 `DeviceMismatch` 不适用）：本机上的任何程序都可以用它（输入法、测试客户端轮流用互不影响），服务端只记最近一次连接的 `device_id` / `device_name`。
 - 被撤销或文件丢失 ⇒ flashasr 下次启动重建；改了端口 ⇒ key 不变、地址更新。终端连接失败时应重新读一次此文件。
 
 ---
@@ -166,7 +169,7 @@ Authorization: Bearer <key>
 
 **声纹**：服务端为每个终端单独累积使用人的声纹，攒够后自动剔除别人的声音（如旁边的人说话、视频声音）。终端被吊销时声纹一并删除；终端可主动重置（§5.5）。
 
-成功 ⇒ 服务端回 `task-started`（§5.1），**之后**才能发音频。失败 ⇒ `task-failed`（§5.4）；其中 `KeyRevoked` / `KeyExpired` / `InvalidKey` / `DeviceMismatch` / `MissingDeviceInfo` 之后服务端**断开连接**。
+成功 ⇒ 服务端回 `task-started`（§5.1），**之后**才能发音频。失败 ⇒ `task-failed`（§5.4）；**注意 `task-started` 只代表请求被受理，不代表识别通道已开好**：`ModelNotReady` / `ServiceBusy` 是在 `task-started` 之后才以 `task-failed` 告知的（识别中途还可能 `EngineRestarted`），终端收到 `task-started` 后仍须处理 `task-failed`。其中 `KeyRevoked` / `KeyExpired` / `InvalidKey` / `DeviceMismatch` / `MissingDeviceInfo` 之后服务端**断开连接**。
 
 ### 4.2 音频：二进制帧
 
@@ -297,12 +300,15 @@ Authorization: Bearer <key>
 
 | 请求 | 作用 | 成功返回 |
 | --- | --- | --- |
-| `GET /v1/status` + `Authorization: Bearer <key>` | 服务状态，终端据此决定能否开始识别 | `200` `{"service":"flashasr","version":"0.1.0","protocol":1,"engine_online":true,"local_realtime_ready":true,"llm_configured":false,"paused":false}` |
+| `GET /v1/status` + `Authorization: Bearer <key>` | 服务状态，终端据此决定能否开始识别 | `200` `{"service":"flashasr","version":"0.1.0","protocol":1,"engine_online":true,"local_realtime_ready":true,"llm_configured":false,"paused":false,"max_sessions":8,"active_sessions":1,"free_sessions":7}` |
 | `POST /v1/profile/voiceprint/reset` + `Authorization: Bearer <key>`（无正文） | 清空**本终端自己**的声纹，之后从零重新累积（终端由 key 确定，不收其它参数） | `200` `{"reset":true}` |
 
 - `engine_online = false` ⇒ `local_realtime_ready` / `llm_configured` 恒为 `false`。
 - `llm_configured` = 服务端开了大模型且填了地址和 key（输出优化可用）。
-- 没带 key / key 无效 ⇒ `401`。路径或方法不对 ⇒ 当作 WebSocket 升级处理（会失败）。
+- `max_sessions` = 服务端能同时进行的识别路数上限（所有终端合计）；`active_sessions` = 此刻正在进行的识别路数；`free_sessions` = 二者之差（不小于 0）。`free_sessions = 0` 时新的 `run-task` 多半会收到 `ServiceBusy`（终端可据此先提示「对方正忙」）。
+  - **上限是估算值**：识别模型加载完时按当时的空闲显存算（每路约 150MB，先给本机留 1GB，硬顶 8；查不到显存时取硬顶 8），之后不再变。运行中显存被别的程序占掉时实际可开的会更少，以 `ServiceBusy` 为准。
+  - 模型没加载完 / 引擎不在线 ⇒ `max_sessions` 与 `free_sessions` 为 0。
+- 没带 key / key 无效 ⇒ `401`，正文 `{"error":"InvalidKey"}`（不区分过期 / 撤销）。路径或方法不对 ⇒ 当作 WebSocket 升级处理（会失败）。
 
 ---
 

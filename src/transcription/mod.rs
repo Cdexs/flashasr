@@ -10,7 +10,6 @@ use crate::{config::ChineseScript, punctuation, text_normalizer};
 use sherpa_onnx::OfflineSenseVoiceModelConfig;
 
 pub(crate) mod char_times;
-pub mod feiyin_remote;
 pub mod local_stream;
 pub mod qwen_inference;
 // SPEAKER-VERIFY-408B：声纹模块接入本地实时路B（408A 独立模块 + 408B 过滤/注册）。
@@ -3404,67 +3403,6 @@ fn check_qwen3_model_ready(model_dir: &Path) -> (bool, PathBuf) {
 #[allow(dead_code)]
 pub fn check_accuracy_model_ready(model_dir: &Path) -> (bool, PathBuf) {
     check_qwen3_model_ready(model_dir)
-}
-
-/// ASR-038-B: 从 wordbook 表加载热词 vocabulary（调用链证明）
-///
-/// **调用链**：
-/// `wordbook::Wordbook::list_all()` → `db::load_word_entries()`（只查 `wordbook` 表）
-/// → 转换为 `qwen_inference::VocabEntry` → `qwen_inference::build_vocabulary()`
-///
-/// 🔴 **数据源保证**：`Wordbook::list_all()` 只查 `wordbook` 表（`db::load_word_entries()`），
-/// **不查 `wordbook_candidates` 表**（163 条未确认候选，禁止注入）。
-/// `wordbook_candidates` 由 `db::upsert_candidate` / `db::load_candidates` 管理，
-/// 本函数不调用这些接口。
-///
-/// 权重：user=5（专名领域词）、system=4（历史 bug 沉淀保护词）、未知=3
-/// 超限词条由 `build_vocabulary` 内部过滤（跳过 ASR 但保留给 LLM）
-pub fn load_wordbook_vocabulary() -> serde_json::Value {
-    match crate::wordbook::Wordbook::open() {
-        Ok(wb) => match wb.list_all() {
-            Ok(entries) => {
-                let vocab_entries: Vec<qwen_inference::VocabEntry> = entries
-                    .into_iter()
-                    .map(|e| qwen_inference::VocabEntry {
-                        word: e.word,
-                        source: e.source,
-                    })
-                    .collect();
-                log::info!(
-                    "ASR vocabulary loaded from wordbook table: {} entries",
-                    vocab_entries.len()
-                );
-                qwen_inference::build_vocabulary(&vocab_entries)
-            }
-            Err(e) => {
-                log::warn!("Failed to load wordbook for ASR vocabulary: {}", e);
-                serde_json::json!({})
-            }
-        },
-        Err(e) => {
-            log::warn!("Failed to open wordbook for ASR vocabulary: {}", e);
-            serde_json::json!({})
-        }
-    }
-}
-
-/// FLASH-P0-509：连自家识别服务时的词表 = **完整词库字符串数组**，顺序同 `list_all`（id 倒序，
-/// 与本机本地实时 `load_hotwords_for_accuracy` 同源同序）。不走阿里长度过滤 / 权重 ——
-/// 对方用的是同一套本地实时精解（预算裁剪在对方 `build_hotwords_string` 里做，与本机一致）。
-/// 只查 `wordbook` 表（不含候选表），同 [`load_wordbook_vocabulary`]。
-pub fn load_wordbook_word_array() -> serde_json::Value {
-    let words: Vec<String> = match crate::wordbook::Wordbook::open().and_then(|wb| wb.list_all()) {
-        Ok(entries) => entries.into_iter().map(|e| e.word).collect(),
-        Err(e) => {
-            log::warn!("Failed to load wordbook for remote ASR vocabulary: {}", e);
-            Vec::new()
-        }
-    };
-    log::info!(
-        "Remote ASR vocabulary loaded from wordbook table: {} entries",
-        words.len()
-    );
-    serde_json::json!(words)
 }
 
 #[cfg(test)]

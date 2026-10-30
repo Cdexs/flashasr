@@ -121,41 +121,39 @@ if hashlib.sha256(tls.getpeercert(binary_form=True)).hexdigest() != fp:
 
 # ③ WebSocket 升级（TLS 已由上面做完，所以这里用 ws:// + 现成 socket）
 host_hdr = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
-ws = connect(f"ws://{host_hdr}/", sock=tls, compression=None,
-             additional_headers={"Authorization": f"Bearer {key}"})
+with connect(f"ws://{host_hdr}/", sock=tls, compression=None,
+             additional_headers={"Authorization": f"Bearer {key}"}) as ws:
+    # ④ run-task
+    task_id = uuid.uuid4().hex
+    ws.send(json.dumps({
+        "header": {"action": "run-task", "task_id": task_id, "streaming": "duplex"},
+        "payload": {"task_group": "audio", "task": "asr", "function": "recognition",
+                    "model": "flashasr", "input": {},
+                    "parameters": {"format": "pcm", "sample_rate": 16000,
+                                   "feiyin": {"device_id": "demo0000device01", "device_name": "quickstart"}}},
+    }))
 
-# ④ run-task
-task_id = uuid.uuid4().hex
-ws.send(json.dumps({
-    "header": {"action": "run-task", "task_id": task_id, "streaming": "duplex"},
-    "payload": {"task_group": "audio", "task": "asr", "function": "recognition",
-                "model": "flashasr", "input": {},
-                "parameters": {"format": "pcm", "sample_rate": 16000,
-                               "feiyin": {"device_id": "demo0000device01", "device_name": "quickstart"}}},
-}))
+    with wave.open(wav_path) as w:
+        assert (w.getframerate(), w.getnchannels(), w.getsampwidth()) == (16000, 1, 2)
+        pcm = w.readframes(w.getnframes())
 
-with wave.open(wav_path) as w:
-    assert (w.getframerate(), w.getnchannels(), w.getsampwidth()) == (16000, 1, 2)
-    pcm = w.readframes(w.getnframes())
+    def send_audio():                     # ⑤ 按实时节奏发音频，说完发 finish-task
+        for i in range(0, len(pcm), 3200):
+            ws.send(pcm[i:i + 3200]); time.sleep(0.1)
+        ws.send(json.dumps({"header": {"action": "finish-task", "task_id": task_id, "streaming": "duplex"},
+                            "payload": {"input": {}}}))
 
-def send_audio():                     # ⑤ 按实时节奏发音频，说完发 finish-task
-    for i in range(0, len(pcm), 3200):
-        ws.send(pcm[i:i + 3200]); time.sleep(0.1)
-    ws.send(json.dumps({"header": {"action": "finish-task", "task_id": task_id, "streaming": "duplex"},
-                        "payload": {"input": {}}}))
-
-for raw in ws:
-    ev = json.loads(raw); name = ev["header"]["event"]
-    if name == "task-started":
-        threading.Thread(target=send_audio, daemon=True).start()
-    elif name == "result-generated":
-        s = ev["payload"]["output"]["sentence"]
-        print(("[终稿] " if s["sentence_end"] else "[预览] ") + s["text"])
-    elif name == "task-finished":
-        print("用量：", ev["payload"]["usage"]); break
-    elif name == "task-failed":
-        print("失败：", ev["header"]["error_code"], ev["header"]["error_message"]); break
-ws.close()
+    for raw in ws:
+        ev = json.loads(raw); name = ev["header"]["event"]
+        if name == "task-started":
+            threading.Thread(target=send_audio, daemon=True).start()
+        elif name == "result-generated":
+            s = ev["payload"]["output"]["sentence"]
+            print(("[终稿] " if s["sentence_end"] else "[预览] ") + s["text"])
+        elif name == "task-finished":
+            print("用量：", ev["payload"]["usage"]); break
+        elif name == "task-failed":
+            print("失败：", ev["header"]["error_code"], ev["header"]["error_message"]); break
 ```
 
 ---
@@ -784,7 +782,10 @@ Authorization: Bearer MFRGGZDFMZTWQ2LKNNWG23TPOA
   "engine_online": true,
   "local_realtime_ready": true,
   "llm_configured": false,
-  "paused": false
+  "paused": false,
+  "max_sessions": 8,
+  "active_sessions": 1,
+  "free_sessions": 7
 }
 ```
 
@@ -797,8 +798,13 @@ Authorization: Bearer MFRGGZDFMZTWQ2LKNNWG23TPOA
 | `local_realtime_ready` | boolean | 识别模型是否已加载完。`false` 时 `run-task` 会得到 `ModelNotReady` |
 | `llm_configured` | boolean | 服务端是否启用大模型并填了地址和 key（输出优化可用） |
 | `paused` | boolean | 服务端是否暂停接入。`true` 时新的升级请求得到 `503`，`run-task` 得到 `ServicePaused` |
+| `max_sessions` | integer | 服务端能同时进行的识别路数上限（所有终端合计）。模型没加载完 / 引擎不在线时为 `0` |
+| `active_sessions` | integer | 此刻正在进行的识别路数（所有终端合计） |
+| `free_sessions` | integer | `max_sessions - active_sessions`（不小于 0）。为 `0` 时新的 `run-task` 多半会得到 `ServiceBusy` |
 
-`engine_online = false` 时，`local_realtime_ready` 与 `llm_configured` 恒为 `false`。
+`engine_online = false` 时，`local_realtime_ready` 与 `llm_configured` 恒为 `false`，`max_sessions` / `free_sessions` 为 `0`。
+
+**`max_sessions` 的取值口径**：上限由显存决定，是**估算值**。识别模型加载完时按当时的空闲显存算一次（每路按约 150MB 计，先给本机留 1GB，硬顶 8 路；查不到显存时取硬顶 8），之后不再变。运行中显存被其他程序占用时，实际能开的路数可能更少——以 `run-task` 是否得到 `ServiceBusy` 为准。旧版服务端没有这三个字段，终端应按「缺字段 = 未知」处理。
 
 **能开始识别** ⇔ `engine_online && local_realtime_ready && !paused`。
 
@@ -1249,11 +1255,8 @@ def main():
     pairing = parse_pair_code(args.code)
     pcm = load_wav(args.wav)                      # 先检查音频，格式不对就不占连接
     endpoint = pick_endpoint(pairing)
-    ws = open_ws(endpoint, pairing["key"], pairing["fp"])
-    try:
+    with open_ws(endpoint, pairing["key"], pairing["fp"]) as ws:   # 退出 with 即关闭连接
         return recognize(ws, pcm, args)
-    finally:
-        ws.close()
 
 
 if __name__ == "__main__":

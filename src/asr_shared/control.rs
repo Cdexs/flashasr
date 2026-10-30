@@ -60,6 +60,10 @@ pub struct Status {
     pub llm_configured: bool,
     /// FLASH-P2b-01：本地实时模型加载失败的原因（空 = 没失败）。
     pub load_error: String,
+    /// 同时识别路数上限（同 `/v1/status` `max_sessions`：模型就绪时按空闲显存估算，没就绪 ⇒ 0）。
+    pub max_sessions: usize,
+    /// 此刻正在进行的识别路数（同 `/v1/status` `active_sessions`）。
+    pub active_sessions: usize,
 }
 
 /// FLASH-P2b-01：终端列表一行（不含 key —— 终端表里也只有 key 的哈希）。

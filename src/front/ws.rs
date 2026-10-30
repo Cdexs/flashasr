@@ -157,6 +157,12 @@ impl Shared {
             local_realtime_ready: engine_online && st.local_realtime,
             llm_configured: engine_online && st.llm,
             load_error: st.load_error,
+            max_sessions: if engine_online && st.local_realtime {
+                st.max_sessions
+            } else {
+                0
+            },
+            active_sessions: self.core.active_sessions(),
         }
     }
 
@@ -495,6 +501,8 @@ async fn answer_api(
                         st.local_realtime,
                         st.llm,
                         shared.paused(),
+                        st.max_sessions,
+                        shared.core.active_sessions(),
                     ),
                 )
             }
@@ -614,9 +622,7 @@ impl Conn {
         let _ = ws.close(None).await;
         lock(&self.shared.online).remove(&self.conn_id);
         if let Some(id) = &self.terminal {
-            self.shared
-                .core
-                .send(Frame::new(Kind::Logout, self.conn_id, Vec::new()));
+            self.shared.core.logout(self.conn_id);
             self.shared.with_store(|st| match st.get_mut(id) {
                 Some(t) => {
                     t.last_logout_ts = now_ts();
@@ -805,12 +811,8 @@ impl Conn {
                 }
                 self.shared.succeed(self.ip);
                 if first {
-                    // 统计「登录 / 退出」记录由内核写（§16.4）；会话号字段放连接号。
-                    self.shared.core.send(Frame::new(
-                        Kind::Login,
-                        self.conn_id,
-                        id.clone().into_bytes(),
-                    ));
+                    // 统计「登录 / 退出」记录由内核写（§16.4）；前台记下在线连接，引擎重启后补报。
+                    self.shared.core.login(self.conn_id, id);
                 }
                 self.terminal = Some(id.clone());
             }

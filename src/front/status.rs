@@ -5,7 +5,10 @@
 //!
 //! 返回内容（终端据此决定能不能发识别、要不要提示升级 / 稍后再试）：
 //! `{"service":"flashasr","version":"0.1.0","protocol":1,"engine_online":true,"local_realtime_ready":true,
-//!   "llm_configured":false,"paused":false}`
+//!   "llm_configured":false,"paused":false,"max_sessions":8,"active_sessions":1,"free_sessions":7}`
+//!
+//! `max_sessions` = 同时识别路数上限（引擎模型加载完时按空闲显存估算，硬顶 8）；`active_sessions` = 前台
+//! 此刻正在进行的识别路数；`free_sessions` = 二者之差（不小于 0）。
 
 use std::io;
 use std::pin::Pin;
@@ -121,7 +124,15 @@ pub fn status_body(
     local_realtime_ready: bool,
     llm: bool,
     paused: bool,
+    max_sessions: usize,
+    active_sessions: usize,
 ) -> Value {
+    // 上限只在本地实时模型就绪时有意义（没就绪 ⇒ 0：此刻一路也开不了）。
+    let max_sessions = if engine_online && local_realtime_ready {
+        max_sessions
+    } else {
+        0
+    };
     json!({
         "service": "flashasr",
         "version": env!("CARGO_PKG_VERSION"),
@@ -130,6 +141,9 @@ pub fn status_body(
         "local_realtime_ready": engine_online && local_realtime_ready,
         "llm_configured": engine_online && llm,
         "paused": paused,
+        "max_sessions": max_sessions,
+        "active_sessions": active_sessions,
+        "free_sessions": max_sessions.saturating_sub(active_sessions),
     })
 }
 
@@ -173,13 +187,20 @@ mod tests {
 
     #[test]
     fn body_hides_engine_details_when_offline() {
-        let b = status_body(false, true, true, false);
+        let b = status_body(false, true, true, false, 8, 0);
         assert_eq!(b["engine_online"], false);
         assert_eq!(b["local_realtime_ready"], false, "引擎不在线时不报就绪");
         assert_eq!(b["llm_configured"], false);
-        let b = status_body(true, true, false, true);
+        assert_eq!(b["max_sessions"], 0, "引擎不在线 ⇒ 一路也开不了");
+        assert_eq!(b["free_sessions"], 0);
+        let b = status_body(true, true, false, true, 8, 3);
         assert_eq!(b["local_realtime_ready"], true);
         assert_eq!(b["paused"], true);
+        assert_eq!(b["max_sessions"], 8);
+        assert_eq!(b["active_sessions"], 3);
+        assert_eq!(b["free_sessions"], 5);
+        let b = status_body(true, true, false, false, 2, 3);
+        assert_eq!(b["free_sessions"], 0, "超出上限不出负数");
         assert_eq!(b["protocol"], PROTOCOL_VERSION);
     }
 

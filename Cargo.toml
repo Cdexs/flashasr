@@ -33,11 +33,9 @@ ctranslate2 = { version = "2.1.1", default-features = false, features = ["tokeni
 ctranslate2-sys = { version = "0.1.5", features = ["crt-dynamic", "shared", "ruy"] }
 sentencepiece = "0.13.1"
 
-# 大模型（输出优化 / 翻译）与在线 FunASR
+# 大模型（输出优化 / 翻译）。在线 FunASR / 在线 Qwen Audio 客户端已删（flashasr 只做本地实时），`tungstenite` 客户端、`base64` 随之去掉。
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
-tungstenite = { version = "0.26", default-features = false, features = ["handshake", "url", "rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-base64 = "0.22"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

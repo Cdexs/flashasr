@@ -651,6 +651,19 @@ impl LlamaAsr {
         }
         slots_for_free_vram(free)
     }
+
+    /// flashasr：对外报的同时会话上限（`/v1/status` `max_sessions`），在**还没开任何远程通道时**调用。
+    /// 口径同 `open_session` 的准入：查得到显存 ⇒ 按此刻空闲显存估算（封顶 [`SLOT_MAX`]）；
+    /// 查不到 ⇒ 准入只受硬顶约束（[`Self::max_remote_slots`] 此时恒 ≥1），报 [`SLOT_MAX`]。
+    pub(crate) fn remote_capacity(&self) -> usize {
+        let (mut free, mut total) = (0u64, 0u64);
+        // SAFETY：同 `max_remote_slots`。
+        let rc = unsafe { las_dev_memory(self.core.0, &mut free, &mut total) };
+        if rc != 0 {
+            return SLOT_MAX;
+        }
+        slots_for_free_vram(free)
+    }
 }
 
 /// 空闲显存 ⇒ 可开远程通道数：先给本机留 [`SLOT_VRAM_RESERVE`]，余下按每路 [`SLOT_VRAM_BYTES`] 算，封顶 [`SLOT_MAX`]。

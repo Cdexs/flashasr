@@ -351,8 +351,7 @@ fn llm_translate(
         }
     };
     let client = crate::llm::LlmClient::new(config.llm.clone());
-    let script_instruction =
-        text_normalizer::script_instruction_for_translate(text, config.audio.chinese_script);
+    let script_instruction = llm_translate_script_instruction(text, o);
     // FLASH-P2-05：大模型翻译同样用终端场景。
     let scene = o.scene.clone();
     match rt.block_on(client.optimize_and_translate(
@@ -374,6 +373,12 @@ fn llm_translate(
             None
         }
     }
+}
+
+/// 大模型翻译的繁简指令：跟终端传的 `chinese_script`（`TextOpts.script`），不用服务端设置
+///（同输出优化 `llm_optimize`；繁简是终端的显示偏好）。
+fn llm_translate_script_instruction(text: &str, o: &TextOpts) -> Option<&'static str> {
+    text_normalizer::script_instruction_for_translate(text, o.script)
 }
 
 /// 离线翻译请求：原文、方向、回信。
@@ -748,6 +753,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// 大模型翻译的繁简指令跟终端（`TextOpts.script`），不看服务端 `audio.chinese_script`。
+    #[test]
+    fn llm_translate_script_follows_terminal() {
+        let mut o = opts(true, true);
+        o.script = ChineseScript::Traditional;
+        assert!(llm_translate_script_instruction("今天天气不错", &o)
+            .unwrap()
+            .contains("Traditional"));
+        o.script = ChineseScript::Simplified;
+        assert!(llm_translate_script_instruction("今天天气不错", &o)
+            .unwrap()
+            .contains("Simplified"));
+        // 不含汉字 ⇒ 不发繁简指令。
+        assert_eq!(llm_translate_script_instruction("hello world", &o), None);
     }
 
     #[test]
