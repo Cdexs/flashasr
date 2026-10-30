@@ -13,3 +13,4 @@ patches/**/target/
 /vendor/llama-runtime/
 /vendor/runtime/
 /vendor/sherpa-onnx/*-Release.tar.bz2
+/dist/

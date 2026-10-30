@@ -45,7 +45,8 @@ SECRET_PLACEHOLDER='REDACTED|PLACEHOLDER|YOUR[_-]?|xxxx|EXAMPLE|CHANGE[_-]?ME|<[
 #  - patry.nicolas@protonmail.com : 上游 esaxx-rs crate（patches/esaxx-rs，原样入库）Cargo.toml 的 authors 公开字段
 #  - business@pglaf.org / gbnewby@pglaf.org : esaxx-rs 自带测试语料（古腾堡计划公版文本）许可声明里的公开联系地址
 #                               （P3-D 补丁从 voice-ime 迁入时被拦；同 alex@alexcrichton.com 先例，非本项目凭证）
-SECRET_EMAIL_WHITELIST='cdexs@hotmail\.com|gavinshare6@outlook\.com|johannesg@5d6\.de|alex@alexcrichton\.com|patry\.nicolas@protonmail\.com|business@pglaf\.org|gbnewby@pglaf\.org|noreply@[A-Za-z0-9.-]+|@users\.noreply\.github\.com|@[A-Za-z0-9.-]+\.example\.com|@[0-9]x\.(png|jpe?g|webp|gif|svg|ico)\b'
+#  - 847320916@qq.com         : Inno Setup 简体中文语言文件（installer/languages/ChineseSimplified.isl，上游 issrc 非官方语言原样入库）译者 Kira 的公开联系地址
+SECRET_EMAIL_WHITELIST='847320916@qq\.com|cdexs@hotmail\.com|gavinshare6@outlook\.com|johannesg@5d6\.de|alex@alexcrichton\.com|patry\.nicolas@protonmail\.com|business@pglaf\.org|gbnewby@pglaf\.org|noreply@[A-Za-z0-9.-]+|@users\.noreply\.github\.com|@[A-Za-z0-9.-]+\.example\.com|@[0-9]x\.(png|jpe?g|webp|gif|svg|ico)\b'
 
 # ---- 扫描函数 ---------------------------------------------------------
 
