@@ -4,6 +4,7 @@
 
 | 编号 | 说明 | 负责人 | 时间 |
 | --- | --- | --- | --- |
+| PAIR-PIN-USER-WORDBOOK | **6位配对码 + 用户维度词库与声纹共享**：新增6位数字配对码（`pair_code`，SHA-256 校验）与 `pair-terminal` 即时配对验证动作；新增 `user_id` 标识（最长12位字母数字且首字符为字母，`^[A-Za-z][A-Za-z0-9]{0,11}$`，大小写敏感并映射至大小写安全声纹文件 `_u<bitmask>.bin`），服务端按 `user_id` 隔离存储用户词表与系统学习词表（`get-wordbook` / `update-wordbook`，禁止客户端改写系统词），并按 `user_id` 挂载声纹槽位实现跨终端共享；`flashasr-ui` 新增终端弹窗展示6位配对码，终端列表显示 `user_id` 与 `device_id`；同步更新 `docs/API.md`、`docs/ASR-PROTOCOL.md` 与 `tools/asr-client/feiyin_asr_client.py` | 主控 / 子 Agent | 2026-11-13 |
 | STOP-RESTART-FIX | **修复管理界面停止服务后再点启动无法启动且引擎不加载**（方案A）：Windows 下阻断 `flashasr-ui` / 自重启 / 引擎子进程继承 `7860` 端口 socket 与 `flashasr.lock` 句柄（`SetHandleInformation` + `CreateProcessW(bInheritHandles=FALSE)`）；`run()` 改为先绑端口（支持 5s 重试）再拉起 `flashasr-engine`，绑端口失败不退出常驻前台；停止/退出清理 `asr-gateway.json`；`server_set_enabled(true)` 检测 `flashasr.lock` 未持有时自动拉起前台 | 主控 / 子 Agent | 2026-11-12 |
 | MODELS-PACK | **模型包 Release + 缺模型提示**（Gavin 10-30）：GitHub Release `models-v1` 上传 7z 三分卷（含 LICENSES，NLLB 注明仅限非商业）+ 校验值；管理界面「服务」页模型没放好时显示三步说明、下载地址（点击打开 / 复制）、解压目录（打开 / 复制），清单单一来源 `asr_shared::models` | 主控 | 2026-10-30 |
 | SPEED-WORDTIMES-517 | 新参数 `feiyin.word_times`（缺省 true；false ⇒ 松键后最后一窗不强制对齐，终稿快 ~0.25s）；预览帧按 `chinese_script` 转繁简（与终稿一致）。Gavin 定不测试，直接构建出包 | 主控 | 2026-10-30 |

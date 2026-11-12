@@ -180,35 +180,54 @@ impl Shared {
             .terminals
             .iter()
             .filter(|t| !t.revoked)
-            .map(|t| TerminalRow {
-                terminal_id: t.id.clone(),
-                device_name: t.device_name.clone(),
-                bound: t.bound(),
-                local: t.local,
-                created_ts: t.created_ts,
-                last_login_ts: t.last_login_ts,
-                last_logout_ts: t.last_logout_ts,
-                last_net: t.last_net.clone(),
-                online: online.contains(&t.id),
-                has_voiceprint: crate::asr_shared::terminal_voiceprint_path(&t.id)
-                    .is_some_and(|p| p.exists()),
+            .map(|t| {
+                let vp_key = t.voiceprint_key();
+                TerminalRow {
+                    terminal_id: t.id.clone(),
+                    user_id: t.user_id.clone(),
+                    device_id: t.device_id.clone(),
+                    device_name: t.device_name.clone(),
+                    bound: t.bound(),
+                    local: t.local,
+                    created_ts: t.created_ts,
+                    last_login_ts: t.last_login_ts,
+                    last_logout_ts: t.last_logout_ts,
+                    last_net: t.last_net.clone(),
+                    online: online.contains(&t.id),
+                    has_voiceprint: crate::asr_shared::user_voiceprint_path(vp_key, &t.id)
+                        .is_some_and(|p| p.exists()),
+                }
             })
             .collect();
         rows.sort_by_key(|r| (!r.local, r.created_ts));
         rows
     }
 
-    /// FLASH-P2-05 / P2b-01：重置某终端的声纹（终端自己经 HTTP、管理界面经控制通道，同一做法）。
+    /// 找出终端对应的声纹归属键（已绑 `user_id` 则按用户，否则按 `terminal_id`）。
+    fn voiceprint_owner_for_terminal(&self, terminal_id: &str) -> String {
+        let _g = lock(&self.store);
+        TerminalStore::load()
+            .get(terminal_id)
+            .map(|t| t.voiceprint_key().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| terminal_id.to_string())
+    }
+
+    /// FLASH-P2-05 / P2b-01 / USER-DIM：重置某终端所属用户的声纹（终端经 HTTP、管理界面经控制通道，同一做法）。
     /// 引擎在线 ⇒ 交给引擎（它要丢内存那份再删档）；不在线 ⇒ 直接删档（引擎重启后从文件读，自然为空）。
     pub fn reset_voiceprint(&self, terminal_id: &str) {
+        let owner_key = self.voiceprint_owner_for_terminal(terminal_id);
         if self.core.engine_up() {
             self.core.send(Frame::new(
                 Kind::ResetVoiceprint,
                 0,
-                terminal_id.as_bytes().to_vec(),
+                owner_key.as_bytes().to_vec(),
             ));
-        } else if let Err(e) = crate::asr_shared::purge_terminal_voiceprint(terminal_id) {
-            log::warn!("[flashasr] 删除终端 {terminal_id} 声纹失败：{e}");
+        } else {
+            let _ = crate::asr_shared::purge_terminal_voiceprint(&owner_key);
+            if owner_key != terminal_id {
+                let _ = crate::asr_shared::purge_terminal_voiceprint(terminal_id);
+            }
         }
     }
 
@@ -220,12 +239,12 @@ impl Shared {
         }
     }
 
-    /// 添加终端：生成 key 并给出二维码内容（外网地址每次从设置文件现读，设置页改了立即生效）。
+    /// 添加终端：生成 key 与 6 位数字配对码并给出二维码内容（外网地址每次从设置文件现读，设置页改了立即生效）。
     pub fn add_terminal(&self) -> std::io::Result<Added> {
         let now = now_ts();
-        let (terminal_id, key) = self.with_store_io(|st| {
+        let (terminal_id, key, pair_code) = self.with_store_io(|st| {
             st.prune_expired(now);
-            st.create(now)
+            st.create_with_pin(now)
         })?;
         let settings = ServiceSettings {
             port: self.port,
@@ -242,6 +261,7 @@ impl Shared {
         Ok(Added {
             terminal_id,
             key,
+            pair_code,
             lan,
             wan,
             uri,
@@ -268,20 +288,39 @@ impl Shared {
     }
 
     /// 撤销：key 作废 + 该终端所有在线连接断开。返回是否找到该终端。
+    /// 若该终端所属用户已无其它有效终端，则同时清理其声纹；若同用户下还有其它终端（如电脑+手机），保留用户声纹。
     pub fn revoke(&self, terminal_id: &str) -> bool {
-        let found = self.with_store(|st| {
+        let (found, purge_key) = self.with_store(|st| {
+            let vp_key = st
+                .get(terminal_id)
+                .map(|t| t.voiceprint_key().to_string())
+                .unwrap_or_default();
             let exists = st.get_mut(terminal_id).is_some();
-            (exists, st.revoke(terminal_id))
+            let dirty = st.revoke(terminal_id);
+            let should_purge =
+                if exists && !vp_key.is_empty() && !st.any_active_with_vp_key(&vp_key, terminal_id)
+                {
+                    Some(vp_key)
+                } else {
+                    None
+                };
+            ((exists, should_purge), dirty)
         });
         for c in lock(&self.online).values() {
             if c.terminal_id == terminal_id {
                 c.kick.notify_one();
             }
         }
-        // FLASH-P0-511：吊销 = 连该终端的声纹一起删（内核在被吊销会话结束时也不会再写回，见 speaker.rs）。
-        if found {
-            if let Err(e) = crate::asr_shared::purge_terminal_voiceprint(terminal_id) {
-                log::warn!("[asr-gateway] FLASH-P0-511 删除终端 {terminal_id} 的声纹失败：{e}");
+        // FLASH-P0-511：仅当该用户已无其它有效终端时删用户声纹（同用户多终端时保留声纹）。
+        if let Some(vp_key) = purge_key {
+            if self.core.engine_up() {
+                self.core.send(Frame::new(
+                    Kind::ResetVoiceprint,
+                    0,
+                    vp_key.as_bytes().to_vec(),
+                ));
+            } else if let Err(e) = crate::asr_shared::purge_terminal_voiceprint(&vp_key) {
+                log::warn!("[asr-gateway] 删除用户/终端 {vp_key} 的声纹失败：{e}");
             }
         }
         found
@@ -445,6 +484,9 @@ pub async fn serve_conn(
         conn_id,
         kick: Arc::new(Notify::new()),
         terminal: None,
+        user_id: None,
+        device_id: None,
+        device_name: None,
         task: None,
     }
     .run(ws)
@@ -463,8 +505,11 @@ struct Conn {
     key: String,
     conn_id: u64,
     kick: Arc<Notify>,
-    /// 鉴权通过后的终端内部编号（首个 `run-task` 时确定；之后同一连接沿用）。
+    /// 鉴权通过后的终端内部编号与用户维度信息（首个鉴权报文确定；同一连接后续报文沿用）。
     terminal: Option<String>,
+    user_id: Option<String>,
+    device_id: Option<String>,
+    device_name: Option<String>,
     task: Option<Task>,
 }
 
@@ -662,6 +707,11 @@ impl Conn {
                 let header = &v["header"];
                 let task_id = header["task_id"].as_str().unwrap_or_default().to_string();
                 match header["action"].as_str() {
+                    Some("pair-terminal") => self.pair_terminal(ws, task_id, &v["payload"]).await,
+                    Some("get-wordbook") => self.get_wordbook(ws, task_id, &v["payload"]).await,
+                    Some("update-wordbook") => {
+                        self.update_wordbook(ws, task_id, &v["payload"]).await
+                    }
                     Some("run-task") => self.run_task(ws, task_id, &v["payload"]).await,
                     Some("finish-task") => {
                         // FLASH-P3-B：`finish-task` 可带 `parameters.translation_enabled`（说完时定的翻译开关，
@@ -690,6 +740,192 @@ impl Conn {
             }
             Message::Close(_) => false,
             _ => true, // Ping / Pong 由 tungstenite 自动处理
+        }
+    }
+
+    /// 从 `payload.parameters.feiyin` 或 `payload.feiyin` 提取身份与配对码；若本连接已鉴权且报文中省略，则沿用连接缓存。
+    fn extract_identity<'a>(&self, payload: &'a Value) -> (String, String, String, Option<String>) {
+        let fy = if payload["parameters"]["feiyin"].is_object() {
+            &payload["parameters"]["feiyin"]
+        } else {
+            &payload["feiyin"]
+        };
+        let uid = fy["user_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| self.user_id.clone())
+            .unwrap_or_default();
+        let did = fy["device_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| self.device_id.clone())
+            .unwrap_or_default();
+        let dname = fy["device_name"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| self.device_name.clone())
+            .unwrap_or_default();
+        let pin = fy["pair_code"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        (uid, did, dname, pin)
+    }
+
+    /// WebSocket Action：`pair-terminal` — 配对阶段立即验证 6 位数字配对码并绑定用户 ID 与设备码。
+    async fn pair_terminal(&mut self, ws: &mut Ws, task_id: String, payload: &Value) -> bool {
+        let fail = |code: &str, msg: &str| failed(&task_id, code, msg);
+        if task_id.is_empty() {
+            return ws
+                .send(fail("InvalidParameter", "missing task_id"))
+                .await
+                .is_ok();
+        }
+        let (user_id, device_id, device_name, pair_code) = self.extract_identity(payload);
+        let (terminal, effective_uid) = match self.authorize(
+            (!user_id.is_empty()).then_some(user_id.as_str()),
+            &device_id,
+            &device_name,
+            pair_code.as_deref(),
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = ws.send(fail(e.code(), "terminal not authorized")).await;
+                return false;
+            }
+        };
+        ws.send(event(
+            &task_id,
+            "terminal-paired",
+            json!({
+                "terminal_id": terminal,
+                "user_id": effective_uid,
+                "device_id": device_id,
+                "device_name": device_name,
+            }),
+        ))
+        .await
+        .is_ok()
+    }
+
+    /// WebSocket Action：`get-wordbook` — 查询当前用户的最新词库（含用户词条与系统词条）。
+    async fn get_wordbook(&mut self, ws: &mut Ws, task_id: String, payload: &Value) -> bool {
+        let fail = |code: &str, msg: &str| failed(&task_id, code, msg);
+        if task_id.is_empty() {
+            return ws
+                .send(fail("InvalidParameter", "missing task_id"))
+                .await
+                .is_ok();
+        }
+        let (user_id, device_id, device_name, pair_code) = self.extract_identity(payload);
+        let (_, effective_uid) = match self.authorize(
+            (!user_id.is_empty()).then_some(user_id.as_str()),
+            &device_id,
+            &device_name,
+            pair_code.as_deref(),
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = ws.send(fail(e.code(), "terminal not authorized")).await;
+                return false;
+            }
+        };
+        match crate::wordbook::db::get_user_wordbook(&effective_uid) {
+            Ok(wb) => ws
+                .send(event(
+                    &task_id,
+                    "wordbook-result",
+                    json!({
+                        "user_id": wb.user_id,
+                        "user_count": wb.user_words.len(),
+                        "system_count": wb.system_words.len(),
+                        "user_words": wb.user_words,
+                        "system_words": wb.system_words,
+                        "entries": wb.entries,
+                    }),
+                ))
+                .await
+                .is_ok(),
+            Err(e) => {
+                log::warn!("[asr-gateway] get-wordbook failed for user {effective_uid}: {e}");
+                ws.send(fail("InternalError", "failed to load wordbook"))
+                    .await
+                    .is_ok()
+            }
+        }
+    }
+
+    /// WebSocket Action：`update-wordbook` — 全量更新当前用户的用户词条（不支持客户端更新系统词条）。
+    async fn update_wordbook(&mut self, ws: &mut Ws, task_id: String, payload: &Value) -> bool {
+        let fail = |code: &str, msg: &str| failed(&task_id, code, msg);
+        if task_id.is_empty() {
+            return ws
+                .send(fail("InvalidParameter", "missing task_id"))
+                .await
+                .is_ok();
+        }
+        if payload.get("system_words").is_some() {
+            return ws
+                .send(fail(
+                    "InvalidParameter",
+                    "system wordbook cannot be updated by client",
+                ))
+                .await
+                .is_ok();
+        }
+        let words_val = payload.get("user_words").or_else(|| payload.get("words"));
+        let Some(words_arr) = words_val.and_then(|v| v.as_array()) else {
+            return ws
+                .send(fail("InvalidParameter", "missing user_words array"))
+                .await
+                .is_ok();
+        };
+        let words: Vec<String> = words_arr
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+
+        let (user_id, device_id, device_name, pair_code) = self.extract_identity(payload);
+        let (_, effective_uid) = match self.authorize(
+            (!user_id.is_empty()).then_some(user_id.as_str()),
+            &device_id,
+            &device_name,
+            pair_code.as_deref(),
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = ws.send(fail(e.code(), "terminal not authorized")).await;
+                return false;
+            }
+        };
+        match crate::wordbook::db::replace_user_words(&effective_uid, &words) {
+            Ok(wb) => ws
+                .send(event(
+                    &task_id,
+                    "wordbook-updated",
+                    json!({
+                        "user_id": wb.user_id,
+                        "user_count": wb.user_words.len(),
+                        "system_count": wb.system_words.len(),
+                        "user_words": wb.user_words,
+                        "system_words": wb.system_words,
+                    }),
+                ))
+                .await
+                .is_ok(),
+            Err(e) => {
+                log::warn!("[asr-gateway] update-wordbook failed for user {effective_uid}: {e}");
+                ws.send(fail("InternalError", "failed to update wordbook"))
+                    .await
+                    .is_ok()
+            }
         }
     }
 
@@ -725,18 +961,23 @@ impl Conn {
                 .await
                 .is_ok();
         }
-        let device_id = p["feiyin"]["device_id"].as_str().unwrap_or_default();
-        let device_name = p["feiyin"]["device_name"].as_str().unwrap_or_default();
-        let terminal = match self.authorize(device_id, device_name) {
-            Ok(id) => id,
+        let (user_id, device_id, device_name, pair_code) = self.extract_identity(payload);
+        let (terminal, effective_uid) = match self.authorize(
+            (!user_id.is_empty()).then_some(user_id.as_str()),
+            &device_id,
+            &device_name,
+            pair_code.as_deref(),
+        ) {
+            Ok(v) => v,
             Err(e) => {
                 let _ = ws.send(fail(e.code(), "terminal not authorized")).await;
                 return false; // 鉴权失败断开
             }
         };
         let params = OpenParams {
-            device_id: device_id.trim().to_string(),
-            device_name: device_name.trim().to_string(),
+            user_id: effective_uid,
+            device_id,
+            device_name,
             terminal_id: terminal,
             vocabulary: vocabulary(p.get("vocabulary")),
             // S10：终端可控的三项（阿里同名字段；缺省 = 数字规整开、补标点开、不翻译）。
@@ -774,16 +1015,30 @@ impl Conn {
             .is_ok()
     }
 
-    /// 首个 `run-task`：key + 设备代码校验（未绑定则绑定）并记登录；之后沿用（设备代码不得中途变）。
-    fn authorize(&mut self, device_id: &str, device_name: &str) -> Result<String, AuthError> {
+    /// 首个鉴权报文：key + 6 位数字配对码（首次绑定时）+ user_id + 设备代码校验（未绑定则绑定）并记登录；之后沿用。
+    fn authorize(
+        &mut self,
+        user_id: Option<&str>,
+        device_id: &str,
+        device_name: &str,
+        pair_code: Option<&str>,
+    ) -> Result<(String, String), AuthError> {
         let now = now_ts();
         let net = net_kind(self.ip);
         let first = self.terminal.is_none();
         let shared = &self.shared;
         let (conn_id, kick) = (self.conn_id, &self.kick);
         let r = shared.with_store(|st| {
-            match st.authorize(&self.key, device_id, device_name, now) {
-                Ok((id, mut dirty)) => {
+            match st.authorize_full(
+                &self.key,
+                user_id,
+                device_id,
+                device_name,
+                pair_code,
+                now,
+                true,
+            ) {
+                Ok((id, uid, mut dirty)) => {
                     if first {
                         if let Some(t) = st.get_mut(&id) {
                             t.last_login_ts = now;
@@ -801,15 +1056,18 @@ impl Conn {
                             },
                         );
                     }
-                    (Ok(id), dirty)
+                    (Ok((id, uid)), dirty)
                 }
                 Err(e) => (Err(e), false),
             }
         });
         match &r {
-            Ok(id) => {
+            Ok((id, uid)) => {
                 if self.terminal.as_ref().is_some_and(|t| t != id) {
                     return Err(AuthError::DeviceMismatch);
+                }
+                if self.user_id.as_ref().is_some_and(|u| u != uid) {
+                    return Err(AuthError::UserMismatch);
                 }
                 self.shared.succeed(self.ip);
                 if first {
@@ -817,6 +1075,9 @@ impl Conn {
                     self.shared.core.login(self.conn_id, id);
                 }
                 self.terminal = Some(id.clone());
+                self.user_id = Some(uid.clone());
+                self.device_id = Some(device_id.trim().to_string());
+                self.device_name = Some(device_name.trim().to_string());
             }
             Err(_) => self.shared.fail(self.ip),
         }
@@ -1210,7 +1471,7 @@ mod tests {
         }
     }
 
-    /// FLASH-P0-511（源码）：网关吊销终端时删其声纹。
+    /// FLASH-P0-511 / USER-DIM（源码）：网关吊销终端时仅在该用户已无其它有效终端时删用户声纹。
     #[test]
     fn revoke_purges_terminal_voiceprint() {
         let prod = prod_src();
@@ -1226,7 +1487,7 @@ mod tests {
             )
             .expect("函数尾")];
         assert!(
-            body.contains("purge_terminal_voiceprint(terminal_id)"),
+            body.contains("any_active_with_vp_key") && body.contains("purge_terminal_voiceprint"),
             "{body}"
         );
     }

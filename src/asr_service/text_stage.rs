@@ -42,6 +42,8 @@ pub(crate) struct TextOpts {
     pub optimize: bool,
     /// FLASH-P2-05：终端带来的场景（输出优化 / 大模型翻译按场景调整写法）；没带 ⇒ 未知。
     pub scene: crate::scene::SceneContext,
+    /// USER-DIM：当前用户生效词表（用于 LLM 输出优化注入 `<wordbook>`）。
+    pub vocabulary: Vec<String>,
 }
 
 /// FLASH-P2-05：终稿处理的附带产物（随终稿回给终端）。
@@ -249,13 +251,15 @@ fn llm_optimize(
     let client = crate::llm::LlmClient::new(config.llm.clone());
     let script_instruction = text_normalizer::script_instruction(raw_text, o.script);
     // FLASH-P2-05：用终端带来的场景（没带 ⇒ 未知、不多行）。窗口标题不外发。
-    match rt.block_on(client.optimize(
+    let custom_words = (!o.vocabulary.is_empty()).then_some(o.vocabulary.as_slice());
+    match rt.block_on(client.optimize_with_words(
         pre_llm_text,
         script_instruction,
         o.punctuation,
         Some(&o.scene),
         o.scene.multiline_safe,
         false,
+        custom_words,
     )) {
         Ok(r) if !r.text.trim().is_empty() => {
             // 同本机 FMT-LLM-005：大模型输出只做繁简（不动大小写）。
@@ -358,7 +362,8 @@ fn llm_translate(
     let script_instruction = llm_translate_script_instruction(text, o);
     // FLASH-P2-05：大模型翻译同样用终端场景。
     let scene = o.scene.clone();
-    match rt.block_on(client.optimize_and_translate(
+    let custom_words = (!o.vocabulary.is_empty()).then_some(o.vocabulary.as_slice());
+    match rt.block_on(client.optimize_and_translate_with_words(
         text,
         target,
         script_instruction,
@@ -366,6 +371,7 @@ fn llm_translate(
         Some(&scene),
         false,
         true,
+        custom_words,
     )) {
         Ok(r) if !r.text.trim().is_empty() => Some(r.text),
         Ok(_) => {
@@ -462,6 +468,7 @@ mod tests {
             strip_trailing: false,
             optimize: false,
             scene: crate::scene::SceneContext::unknown(),
+            vocabulary: Vec::new(),
         }
     }
 

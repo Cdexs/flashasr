@@ -265,6 +265,63 @@ class MessageTests(unittest.TestCase):
                          {"header": {"action": "finish-task", "task_id": "t1", "streaming": "duplex"},
                           "payload": {"input": {}}})
 
+    def test_build_messages_with_user_and_pair_code(self):
+        # 1. build_pair_terminal
+        pt = c.build_pair_terminal("task_pt_01", "Gavin01", "CPU-9F8A", "WorkPC", "123456")
+        self.assertEqual(pt["header"], {"action": "pair-terminal", "task_id": "task_pt_01"})
+        self.assertEqual(pt["payload"], {
+            "feiyin": {
+                "user_id": "Gavin01",
+                "device_id": "CPU-9F8A",
+                "device_name": "WorkPC",
+                "pair_code": "123456",
+            }
+        })
+
+        # 2. build_get_wordbook
+        gw = c.build_get_wordbook("task_gw_01", user_id="Gavin01", device_id="CPU-9F8A", device_name="WorkPC")
+        self.assertEqual(gw["header"], {"action": "get-wordbook", "task_id": "task_gw_01"})
+        self.assertEqual(gw["payload"], {
+            "feiyin": {
+                "user_id": "Gavin01",
+                "device_id": "CPU-9F8A",
+                "device_name": "WorkPC",
+            }
+        })
+
+        # 3. build_update_wordbook
+        uw = c.build_update_wordbook(
+            "task_uw_01",
+            ["自定义词1", "自定义词2"],
+            user_id="Gavin01",
+            device_id="CPU-9F8A",
+            device_name="WorkPC",
+        )
+        self.assertEqual(uw["header"], {"action": "update-wordbook", "task_id": "task_uw_01"})
+        self.assertEqual(uw["payload"], {
+            "user_words": ["自定义词1", "自定义词2"],
+            "feiyin": {
+                "user_id": "Gavin01",
+                "device_id": "CPU-9F8A",
+                "device_name": "WorkPC",
+            }
+        })
+
+        # 4. build_run_task 携带 user_id 和 pair_code
+        rt = c.build_run_task(
+            "task_rt_01",
+            "CPU-9F8A",
+            "WorkPC",
+            user_id="Gavin01",
+            pair_code="654321",
+        )
+        self.assertEqual(rt["header"], {"action": "run-task", "task_id": "task_rt_01", "streaming": "duplex"})
+        fy = rt["payload"]["parameters"]["feiyin"]
+        self.assertEqual(fy["user_id"], "Gavin01")
+        self.assertEqual(fy["pair_code"], "654321")
+        self.assertEqual(fy["device_id"], "CPU-9F8A")
+        self.assertEqual(fy["device_name"], "WorkPC")
+
     def test_device_id_persisted(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, ".feiyin-client.json")
@@ -483,7 +540,7 @@ class LoopbackTests(unittest.TestCase):
         self.assertEqual(p["vocabulary"], ["飞音", "LiveKit"])
         self.assertIs(p["translation_enabled"], True)
         self.assertIs(p["inverse_text_normalization_enabled"], False)
-        self.assertEqual(p["feiyin"], {"device_id": "dev0123456789abc", "device_name": "测试机"})
+        self.assertEqual(p["feiyin"], {"device_id": "dev0123456789abc", "device_name": "测试机", "user_id": "user01"})
         self.assertRegex(gw.run_task["header"]["task_id"], r"^[0-9a-f]{32}$")
         self.assertIn("[预览] 今天买了三【点五】", out)  # tentative=2 ⇒ 末 2 字标出
         self.assertIn("[终稿] 今天。", out)

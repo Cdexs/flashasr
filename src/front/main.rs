@@ -18,6 +18,10 @@ mod frame;
 #[allow(dead_code)]
 #[path = "../asr_service/transport.rs"]
 mod transport;
+// 多用户词库模块（前台 WebSocket `get-wordbook` / `update-wordbook` 直接复用同一份 SQLite DB 层）。
+#[allow(dead_code)]
+#[path = "../wordbook/mod.rs"]
+mod wordbook;
 
 mod core_link;
 mod ctl;
@@ -113,6 +117,9 @@ fn add_terminal_cli() -> i32 {
         Ok(r) if r.error.is_empty() => match r.added {
             Some(a) => {
                 println!("{}", a.uri);
+                if !a.pair_code.is_empty() {
+                    println!("PAIR_CODE: {}", a.pair_code);
+                }
                 0
             }
             None => {

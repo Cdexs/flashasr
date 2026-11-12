@@ -546,6 +546,29 @@ impl LlmClient {
         multiline_safe: bool,
         send_window_title: bool,
     ) -> Result<OptimizeResult> {
+        self.optimize_with_words(
+            text,
+            extra_instruction,
+            punctuation_enabled,
+            scene,
+            multiline_safe,
+            send_window_title,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn optimize_with_words(
+        &self,
+        text: &str,
+        extra_instruction: Option<&str>,
+        punctuation_enabled: bool,
+        scene: Option<&SceneContext>,
+        multiline_safe: bool,
+        send_window_title: bool,
+        custom_words: Option<&[String]>,
+    ) -> Result<OptimizeResult> {
         if !self.config.enabled
             || self.config.api_key.trim().is_empty()
             || !self.config.connectivity_verified
@@ -560,13 +583,14 @@ impl LlmClient {
         }
 
         let url = self.chat_completions_url();
-        let body = self.build_optimize_request(
+        let body = self.build_optimize_request_with_words(
             text,
             extra_instruction,
             punctuation_enabled,
             scene,
             multiline_safe,
             send_window_title,
+            custom_words,
         );
 
         let mut last_err: Option<reqwest::Error> = None;
@@ -754,6 +778,31 @@ impl LlmClient {
         send_window_title: bool,
         multiline_safe: bool,
     ) -> Result<OptimizeResult> {
+        self.optimize_and_translate_with_words(
+            text,
+            target,
+            extra_instruction,
+            punctuation_enabled,
+            scene,
+            send_window_title,
+            multiline_safe,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn optimize_and_translate_with_words(
+        &self,
+        text: &str,
+        target: TranslationLanguage,
+        extra_instruction: Option<&str>,
+        punctuation_enabled: bool,
+        scene: Option<&SceneContext>,
+        send_window_title: bool,
+        multiline_safe: bool,
+        custom_words: Option<&[String]>,
+    ) -> Result<OptimizeResult> {
         if self.config.api_key.trim().is_empty() {
             return Err(anyhow!("LLM api_key not configured"));
         }
@@ -772,10 +821,14 @@ impl LlmClient {
             None => None,
         };
 
+        let wordbook_block = match custom_words {
+            Some(words) => build_wordbook_prompt_block_from_words(words),
+            None => build_wordbook_prompt_block(),
+        };
         let system_content = build_translate_system_content(
             target,
             punctuation_enabled,
-            build_wordbook_prompt_block(),
+            wordbook_block,
             extra_instruction,
             scene_block,
             SYSTEM_BASE_PROMPT,
@@ -851,6 +904,7 @@ impl LlmClient {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_optimize_request(
         &self,
         text: &str,
@@ -859,6 +913,28 @@ impl LlmClient {
         scene: Option<&SceneContext>,
         multiline_safe: bool,
         send_window_title: bool,
+    ) -> ChatRequest {
+        self.build_optimize_request_with_words(
+            text,
+            extra_instruction,
+            punctuation_enabled,
+            scene,
+            multiline_safe,
+            send_window_title,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_optimize_request_with_words(
+        &self,
+        text: &str,
+        extra_instruction: Option<&str>,
+        punctuation_enabled: bool,
+        scene: Option<&SceneContext>,
+        multiline_safe: bool,
+        send_window_title: bool,
+        custom_words: Option<&[String]>,
     ) -> ChatRequest {
         let mut messages = Vec::with_capacity(2);
 
@@ -880,10 +956,14 @@ impl LlmClient {
             None => None,
         };
 
+        let wordbook_block = match custom_words {
+            Some(words) => build_wordbook_prompt_block_from_words(words),
+            None => build_wordbook_prompt_block(),
+        };
         let layers = build_prompt_layers(
             base_prompt,
             extra_instruction,
-            build_wordbook_prompt_block(),
+            wordbook_block,
             scene_block,
             multiline_safe,
             punctuation_enabled,
@@ -1742,6 +1822,32 @@ fn is_fabricated_closing(line: &str) -> bool {
 fn is_two_line_closing(second_last: &str, last: &str) -> bool {
     second_last == "此致"
         && (last.starts_with("敬礼") || last == "敬礼" || last.starts_with("敬礼！"))
+}
+
+fn build_wordbook_prompt_block_from_words(words: &[String]) -> Option<String> {
+    let entries: Vec<WordbookEntry> = words
+        .iter()
+        .map(|w| w.trim())
+        .filter(|w| !w.is_empty())
+        .map(|w| WordbookEntry {
+            word: w.to_string(),
+            source: "user".to_string(),
+            created_at: String::new(),
+        })
+        .collect();
+    if entries.is_empty() {
+        return None;
+    }
+    log::info!(
+        "Injecting {} user-scoped wordbook entries into LLM prompt",
+        entries.len()
+    );
+    Some(format!(
+        "User Vocabulary List: The following are user-defined vocabulary words (names, brands, technical terms). \
+         When the transcription contains a word with similar pronunciation but incorrect spelling, silently correct it to the standard form from this list. \
+         Words already matching the list should be kept as-is. Do NOT explain or reference these corrections.\n{}",
+        format_wordbook_list(&entries)
+    ))
 }
 
 fn build_wordbook_prompt_block() -> Option<String> {

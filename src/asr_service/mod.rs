@@ -267,8 +267,13 @@ fn open_session(
         log::warn!("[ASR-SERVER-491] remote capacity reached (active={active})");
         return Err(ERR_CAPACITY);
     }
-    // FLASH-P0-511：通道带上终端编号 ⇒ 本会话用该终端自己的声纹。
-    let slot = engines.acc.create_slot(&params.terminal_id).map_err(|e| {
+    // FLASH-P0-511 / USER-DIM：声纹优先按用户 ID 归属（跨终端共享），未带 user_id 时退回终端编号。
+    let vp_owner_id = if !params.user_id.trim().is_empty() {
+        params.user_id.trim()
+    } else {
+        params.terminal_id.trim()
+    };
+    let slot = engines.acc.create_slot(vp_owner_id).map_err(|e| {
         log::warn!("[ASR-SERVER-491] create slot failed: {e:#}");
         ERR_CAPACITY
     })?;
@@ -283,7 +288,8 @@ fn open_session(
             .name(format!("asr-remote-{id}"))
             .spawn(move || {
                 log::info!(
-                    "[ASR-SERVER-491] remote session {id} open: device={} name={}",
+                    "[ASR-SERVER-491] remote session {id} open: user={} device={} name={}",
+                    params.user_id,
                     params.device_id,
                     params.device_name
                 );

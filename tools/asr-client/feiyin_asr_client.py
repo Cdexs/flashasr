@@ -589,15 +589,60 @@ def connect_pinned(endpoint, key, expected_fp, timeout=HANDSHAKE_TIMEOUT):
 
 
 # ================================================================ 消息 §4
-def build_run_task(task_id, device_id, device_name, *, itn=True, punct=True, translate=False, vocab=None):
+def build_pair_terminal(task_id, user_id, device_id, device_name, pair_code):
+    """pair-terminal：首次配对立即校验 6 位配对码并绑定用户 ID 与设备。"""
+    fy = {"user_id": user_id, "device_id": device_id, "device_name": device_name}
+    if pair_code:
+        fy["pair_code"] = pair_code
+    return {
+        "header": {"action": "pair-terminal", "task_id": task_id},
+        "payload": {"feiyin": fy},
+    }
+
+
+def build_get_wordbook(task_id, user_id=None, device_id=None, device_name=None):
+    """get-wordbook：查询用户最新词库（含用户词条与系统词条）。"""
+    payload = {}
+    if user_id or device_id or device_name:
+        payload["feiyin"] = {
+            k: v for k, v in (
+                ("user_id", user_id),
+                ("device_id", device_id),
+                ("device_name", device_name),
+            ) if v
+        }
+    return {"header": {"action": "get-wordbook", "task_id": task_id}, "payload": payload}
+
+
+def build_update_wordbook(task_id, user_words, user_id=None, device_id=None, device_name=None):
+    """update-wordbook：全量更新用户词条列表（系统词条由服务端维护，不可客户端更新）。"""
+    payload = {"user_words": list(user_words)}
+    if user_id or device_id or device_name:
+        payload["feiyin"] = {
+            k: v for k, v in (
+                ("user_id", user_id),
+                ("device_id", device_id),
+                ("device_name", device_name),
+            ) if v
+        }
+    return {"header": {"action": "update-wordbook", "task_id": task_id}, "payload": payload}
+
+
+def build_run_task(task_id, device_id, device_name, *, user_id=None, pair_code=None,
+                   itn=True, punct=True, translate=False, vocab=None):
     """§4.1 run-task。字段名与文档一致；vocabulary 仅在给了热词时出现。"""
+    feiyin = {"device_id": device_id, "device_name": device_name}
+    if user_id:
+        feiyin["user_id"] = user_id
+    if pair_code:
+        feiyin["pair_code"] = pair_code
     params = {
         "format": "pcm",
         "sample_rate": SAMPLE_RATE,
         "inverse_text_normalization_enabled": bool(itn),
         "punctuation_prediction_enabled": bool(punct),
         "translation_enabled": bool(translate),
-        "feiyin": {"device_id": device_id, "device_name": device_name},
+        "feiyin": feiyin,
     }
     if vocab:
         params["vocabulary"] = list(vocab)
@@ -720,8 +765,13 @@ def stream_audio(ws, pcm, task_id, fast, errors):
 def run_recognition(ws, pcm, args, device_id, device_name, printer):
     """run-task -> 等 task-started -> 发音频 -> finish-task -> 收事件直到 task-finished/task-failed。返回退出码。"""
     task_id = uuid.uuid4().hex  # §4.1 每段新生成 32 位十六进制
-    msg = build_run_task(task_id, device_id, device_name, itn=not args.no_itn, punct=not args.no_punct,
-                         translate=args.translate, vocab=args.vocab_list)
+    msg = build_run_task(
+        task_id, device_id, device_name,
+        user_id=getattr(args, "user_id", None),
+        pair_code=getattr(args, "pair_code", None),
+        itn=not args.no_itn, punct=not args.no_punct,
+        translate=args.translate, vocab=args.vocab_list,
+    )
     ws.send_text(json.dumps(msg))
     sender, errors = None, []
     while True:
@@ -763,7 +813,9 @@ def run_recognition(ws, pcm, args, device_id, device_name, printer):
             printer.log(f"[task-failed] {code}: {h.get('error_message', '')}")
             hint = {
                 "InvalidKey": "需要重新配对", "KeyExpired": "需要重新配对", "KeyRevoked": "需要重新配对",
-                "DeviceMismatch": "需要重新配对", "ServicePaused": "对方已暂停，稍后再试",
+                "InvalidPairCode": "6 位配对码错误或缺失", "InvalidUserId": "用户 ID 格式不合法",
+                "UserMismatch": "用户 ID 与绑定终端不符", "DeviceMismatch": "需要重新配对",
+                "ServicePaused": "对方已暂停，稍后再试",
                 "ServiceBusy": "对方正忙，稍后再试", "ModelNotReady": "对方识别模型未就绪",
                 "InternalError": "识别失败，可重试",
             }.get(code)
@@ -785,6 +837,10 @@ def build_parser():
     p.add_argument("--mode", choices=["auto", "lan", "wan"], default="auto", help="选地址方式（§2.1），默认 auto")
     p.add_argument("--device-id", help="本机 device_id（缺省读写脚本同目录 .feiyin-client.json）")
     p.add_argument("--device-name", default=DEFAULT_DEVICE_NAME, help=f"本机名称，默认 {DEFAULT_DEVICE_NAME}")
+    p.add_argument("--user-id", default="user01", help="用户 ID（1~12 位字母开头+字母数字，默认 user01）")
+    p.add_argument("--pair-code", help="6 位数字配对码（首次绑定远程终端必填）")
+    p.add_argument("--get-wordbook", action="store_true", help="查询当前用户最新词库（get-wordbook）")
+    p.add_argument("--update-wordbook", help="全量更新用户词条（逗号分隔，update-wordbook）")
     g = p.add_mutually_exclusive_group()
     g.add_argument("--wav", help="16k 单声道 16 位 WAV 文件")
     g.add_argument("--pcm", help="裸 16k s16le PCM 文件")
@@ -814,13 +870,39 @@ def main(argv=None, out=None, err=None):
         return EXIT_NETWORK
 
 
+def run_single_action(ws, msg, expected_event, printer):
+    """发送一条 WebSocket 动作消息（pair-terminal / get-wordbook / update-wordbook）并等待响应事件。"""
+    ws.send_text(json.dumps(msg))
+    while True:
+        op, data = ws.recv_message()
+        if op != OP_TEXT:
+            continue
+        try:
+            ev = json.loads(data.decode("utf-8"))
+            name = ev["header"]["event"]
+        except (ValueError, KeyError, TypeError):
+            printer.log(f"[协议异常] 无法解析的消息：{data[:200]!r}")
+            return EXIT_PROTOCOL
+        if printer.as_json:
+            printer.event(ev)
+        if name == expected_event:
+            if not printer.as_json:
+                print(json.dumps(ev.get("payload", {}), ensure_ascii=False, indent=2), file=printer.out)
+            return EXIT_OK
+        if name == "task-failed":
+            h = ev.get("header", {})
+            printer.log(f"[task-failed] {h.get('error_code', '?')}: {h.get('error_message', '')}")
+            return EXIT_TASK_FAILED
+
+
 def _run(args, printer):
     args.vocab_list = [w.strip() for w in args.vocab.split(",") if w.strip()]
     pairing = pairing_from_args(args)
+    wb_action = bool(args.get_wordbook or args.update_wordbook is not None)
 
     if not args.probe:
-        if not (args.wav or args.pcm):
-            raise UsageError("需要 --wav 或 --pcm（或用 --probe）")
+        if not wb_action and not (args.wav or args.pcm):
+            raise UsageError("需要 --wav 或 --pcm（或用 --probe / --get-wordbook / --update-wordbook）")
         if not pairing.fp:
             # §1.2：指纹为空时先 --probe 取回、让用户核对；未经确认的指纹不得带 key 连接
             raise UsageError("没有指纹：请先用 --probe 取回并与服务端设置页核对，再用 --fp 传入（§1.2）")
@@ -829,7 +911,9 @@ def _run(args, printer):
         if not device_id or not device_name:
             raise UsageError("device_id / device_name 不能为空（§1.4）")
         # 先读音频：格式不对就在连接之前退出，别白占一次连接
-        pcm = load_wav_pcm(args.wav) if args.wav else load_pcm(args.pcm)
+        pcm = None
+        if not wb_action:
+            pcm = load_wav_pcm(args.wav) if args.wav else load_pcm(args.pcm)
 
     label, endpoint = pick_endpoint(pairing, args.mode)  # §2.1
     printer.log(f"[连接] {label} {endpoint}")
@@ -845,6 +929,32 @@ def _run(args, printer):
     ws.timeout = args.timeout
     printer.log("[连接] 已升级为 WebSocket")
     try:
+        user_id = (args.user_id or "").strip()
+        pair_code = (args.pair_code or "").strip() or None
+        if pair_code and wb_action:
+            rc = run_single_action(
+                ws,
+                build_pair_terminal(uuid.uuid4().hex, user_id, device_id, device_name, pair_code),
+                "terminal-paired",
+                printer,
+            )
+            if rc != EXIT_OK:
+                return rc
+        if args.update_wordbook is not None:
+            user_words = [w.strip() for w in args.update_wordbook.split(",") if w.strip()]
+            return run_single_action(
+                ws,
+                build_update_wordbook(uuid.uuid4().hex, user_words, user_id, device_id, device_name),
+                "wordbook-updated",
+                printer,
+            )
+        if args.get_wordbook:
+            return run_single_action(
+                ws,
+                build_get_wordbook(uuid.uuid4().hex, user_id, device_id, device_name),
+                "wordbook-result",
+                printer,
+            )
         return run_recognition(ws, pcm, args, device_id, device_name, printer)
     except WebSocketClosed as e:
         printer.end_inline()

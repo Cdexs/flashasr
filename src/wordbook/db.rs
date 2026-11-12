@@ -16,6 +16,7 @@ const MIGRATION_004: &str = include_str!("../../migrations/004_wordbook_hitcount
 const WORD_SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS wordbook (\
 \n    id INTEGER PRIMARY KEY AUTOINCREMENT,\
+\n    user_id TEXT NOT NULL DEFAULT 'local',\
 \n    word TEXT NOT NULL,\
 \n    source TEXT NOT NULL,\
 \n    created_at TEXT NOT NULL,\
@@ -23,15 +24,35 @@ CREATE TABLE IF NOT EXISTS wordbook (\
 \n    last_used_at TEXT\
 \n);\
 \n\
-\nCREATE UNIQUE INDEX IF NOT EXISTS idx_wordbook_new_unique ON wordbook(word);\
+\nCREATE UNIQUE INDEX IF NOT EXISTS idx_wordbook_user_word ON wordbook(user_id, word);\
 \n\
 \nCREATE TABLE IF NOT EXISTS wordbook_candidates (\
+\n    user_id TEXT NOT NULL DEFAULT 'local',\
 \n    word TEXT NOT NULL,\
 \n    count INTEGER NOT NULL DEFAULT 1,\
 \n    last_seen TEXT NOT NULL,\
-\n    PRIMARY KEY (word)\
+\n    PRIMARY KEY (user_id, word)\
 \n);\
 \n";
+
+/// 单用户词条明细（查询接口 / 前端展示用）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UserWordbookEntry {
+    pub word: String,
+    pub source: String,
+    pub created_at: String,
+    pub hit_count: u64,
+    pub last_used_at: Option<String>,
+}
+
+/// 某用户的完整词库快照（含用户词条列表、系统词条列表与完整明细）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UserWordbook {
+    pub user_id: String,
+    pub user_words: Vec<String>,
+    pub system_words: Vec<String>,
+    pub entries: Vec<UserWordbookEntry>,
+}
 
 /// WORDBOOK-SCHEMA-FIX-001: 并发保护。主程序自动学习写入与设置界面 UI 读取是两个
 /// 进程访问同一库文件，写事务期间对方读会拿到 SQLITE_BUSY 而立即失败（无重试）。
@@ -102,18 +123,15 @@ pub fn get_entry_by_id(id: i64) -> Result<Option<StoredWordbookEntry>> {
 }
 
 pub fn insert_entry(entry: &WordbookEntry) -> Result<bool> {
-    let conn = open_connection()?;
-    let changed = conn.execute(
-        "INSERT OR IGNORE INTO wordbook (word, source, created_at)
-         VALUES (?1, ?2, ?3)",
-        params![entry.word, entry.source, entry.created_at],
-    )?;
-    Ok(changed > 0)
+    insert_entry_for_user("local", entry)
 }
 
 pub fn delete_entry(word: &str) -> Result<bool> {
     let conn = open_connection()?;
-    let changed = conn.execute("DELETE FROM wordbook WHERE word = ?1", params![word])?;
+    let changed = conn.execute(
+        "DELETE FROM wordbook WHERE user_id = 'local' AND word = ?1",
+        params![word],
+    )?;
     Ok(changed > 0)
 }
 
@@ -190,6 +208,7 @@ fn init_schema(conn: &Connection) -> Result<()> {
         conn.execute_batch(WORD_SCHEMA)?;
         // 263: WORD_SCHEMA 已含 hit_count/last_used_at；此处为幂等兜底
         ensure_hitcount_columns(conn)?;
+        ensure_user_id_schema(conn)?;
         return Ok(());
     }
 
@@ -212,15 +231,12 @@ fn init_schema(conn: &Connection) -> Result<()> {
         normalize_source(conn)?;
         // 263: 003 finalize 后的表来自 003 定义（无频率列）→ 补 004
         ensure_hitcount_columns(conn)?;
+        ensure_user_id_schema(conn)?;
         return Ok(());
     }
 
     // 状态 C：已迁移（有 word 列，无 raw 列）→ 幂等保障，不执行 001/002/legacy import
-    // 1. 确保 word 模式唯一索引存在（idx_wordbook_new_unique，003 历史产物名字保持不变）
-    conn.execute_batch(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_wordbook_new_unique ON wordbook(word);",
-    )?;
-    // 2. 确保 wordbook_candidates(word) 表存在
+    // 1. 确保 wordbook_candidates 表存在
     let candidates_exists: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'wordbook_candidates'",
         [],
@@ -229,18 +245,97 @@ fn init_schema(conn: &Connection) -> Result<()> {
     if candidates_exists == 0 {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS wordbook_candidates (\
+             \n    user_id TEXT NOT NULL DEFAULT 'local',\
              \n    word TEXT NOT NULL,\
              \n    count INTEGER NOT NULL DEFAULT 1,\
              \n    last_seen TEXT NOT NULL,\
-             \n    PRIMARY KEY (word)\
+             \n    PRIMARY KEY (user_id, word)\
              \n);",
         )?;
     }
-    // 3. source 归一化：先 SELECT 判断有无非法值，有才 UPDATE（避免写放大）
+    // 2. source 归一化：先 SELECT 判断有无非法值，有才 UPDATE（避免写放大）
     normalize_source(conn)?;
-    // 4. WORDBOOK-HITCOUNT-263: 确保频率列存在（存量库补 004）
+    // 3. WORDBOOK-HITCOUNT-263: 确保频率列存在（存量库补 004）
     ensure_hitcount_columns(conn)?;
+    // 4. USER-DIM: 升级为多用户隔离表（user_id + UNIQUE(user_id, word)）
+    ensure_user_id_schema(conn)?;
 
+    Ok(())
+}
+
+/// USER-DIM：确保 `wordbook` 与 `wordbook_candidates` 具备 `user_id` 列及复合唯一约束 `(user_id, word)`。
+/// 存量单用户库缺 `user_id` 列或仍带旧 `idx_wordbook_new_unique(word)` 时，在事务内无损迁移到默认用户 `'local'`。
+fn ensure_user_id_schema(conn: &Connection) -> Result<()> {
+    let wb_has_uid: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('wordbook') WHERE name = 'user_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    let has_old_idx: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_wordbook_new_unique'",
+        [],
+        |r| r.get(0),
+    )?;
+    if wb_has_uid == 0 || has_old_idx > 0 {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(
+            "DROP TABLE IF EXISTS wordbook_uid_tmp;
+             CREATE TABLE wordbook_uid_tmp (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 user_id TEXT NOT NULL DEFAULT 'local',
+                 word TEXT NOT NULL,
+                 source TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 hit_count INTEGER NOT NULL DEFAULT 0,
+                 last_used_at TEXT
+             );",
+        )?;
+        if wb_has_uid > 0 {
+            tx.execute_batch(
+                "INSERT OR IGNORE INTO wordbook_uid_tmp (id, user_id, word, source, created_at, hit_count, last_used_at)
+                 SELECT id, user_id, word, source, created_at, hit_count, last_used_at FROM wordbook;",
+            )?;
+        } else {
+            tx.execute_batch(
+                "INSERT OR IGNORE INTO wordbook_uid_tmp (id, user_id, word, source, created_at, hit_count, last_used_at)
+                 SELECT id, 'local', word, source, created_at, hit_count, last_used_at FROM wordbook;",
+            )?;
+        }
+        tx.execute_batch(
+            "DROP TABLE wordbook;
+             ALTER TABLE wordbook_uid_tmp RENAME TO wordbook;
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_wordbook_user_word ON wordbook(user_id, word);",
+        )?;
+        tx.commit()?;
+    } else {
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_wordbook_user_word ON wordbook(user_id, word);",
+        )?;
+    }
+
+    let cand_has_uid: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('wordbook_candidates') WHERE name = 'user_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    if cand_has_uid == 0 {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(
+            "DROP TABLE IF EXISTS wordbook_candidates_uid_tmp;
+             CREATE TABLE wordbook_candidates_uid_tmp (
+                 user_id TEXT NOT NULL DEFAULT 'local',
+                 word TEXT NOT NULL,
+                 count INTEGER NOT NULL DEFAULT 1,
+                 last_seen TEXT NOT NULL,
+                 PRIMARY KEY (user_id, word)
+             );
+             INSERT OR IGNORE INTO wordbook_candidates_uid_tmp (user_id, word, count, last_seen)
+             SELECT 'local', word, count, last_seen FROM wordbook_candidates;
+             DROP TABLE wordbook_candidates;
+             ALTER TABLE wordbook_candidates_uid_tmp RENAME TO wordbook_candidates;",
+        )?;
+        tx.commit()?;
+    }
     Ok(())
 }
 
@@ -453,6 +548,7 @@ fn finalize_singleword_migration(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn db_path() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -461,23 +557,264 @@ fn db_path() -> PathBuf {
         .join("wordbook.sqlite")
 }
 
-fn upsert_candidate_in_conn(conn: &Connection, word: &str) -> Result<u32> {
+fn norm_uid(user_id: &str) -> &str {
+    let u = user_id.trim();
+    if u.is_empty() {
+        "local"
+    } else {
+        u
+    }
+}
+
+/// USER-DIM：查询指定用户的完整词库（按 `hit_count DESC, id DESC` 排序，分别汇总用户词条、系统词条与明细）。
+pub fn get_user_wordbook(user_id: &str) -> Result<UserWordbook> {
+    let conn = open_connection()?;
+    get_user_wordbook_in_conn(&conn, norm_uid(user_id))
+}
+
+pub fn get_user_wordbook_in_conn(conn: &Connection, user_id: &str) -> Result<UserWordbook> {
+    let uid = norm_uid(user_id);
+    let mut stmt = conn.prepare(
+        "SELECT word, source, created_at, hit_count, last_used_at
+         FROM wordbook
+         WHERE user_id = ?1
+         ORDER BY hit_count DESC, id DESC",
+    )?;
+    let entries = stmt
+        .query_map(params![uid], |row| {
+            let hit: i64 = row.get(3)?;
+            Ok(UserWordbookEntry {
+                word: row.get(0)?,
+                source: row.get(1)?,
+                created_at: row.get(2)?,
+                hit_count: hit.max(0) as u64,
+                last_used_at: row.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut user_words = Vec::new();
+    let mut system_words = Vec::new();
+    for e in &entries {
+        if e.source == "user" {
+            user_words.push(e.word.clone());
+        } else if e.source == "system" {
+            system_words.push(e.word.clone());
+        }
+    }
+    Ok(UserWordbook {
+        user_id: uid.to_string(),
+        user_words,
+        system_words,
+        entries,
+    })
+}
+
+/// USER-DIM：全量替换指定用户的用户词条（仅改 `source = 'user'`，绝不修改或删除 `source = 'system'` 系统词条）。
+/// 已存在的用户词条保留其 `hit_count` 与 `created_at`；若原词是 `system` 且本次被收入用户词表，则转为 `user` 并保留频率。
+pub fn replace_user_words(user_id: &str, words: &[String]) -> Result<UserWordbook> {
+    let mut conn = open_connection()?;
+    replace_user_words_in_conn(&mut conn, norm_uid(user_id), words)
+}
+
+pub fn replace_user_words_in_conn(
+    conn: &mut Connection,
+    user_id: &str,
+    words: &[String],
+) -> Result<UserWordbook> {
+    let uid = norm_uid(user_id);
+    let mut cleaned: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for raw in words {
+        let w = raw.trim();
+        if w.is_empty() || w.contains('\n') || w.contains('\r') {
+            continue;
+        }
+        if seen.insert(w.to_string()) {
+            cleaned.push(w.to_string());
+        }
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let tx = conn.transaction()?;
+
+    // 删除该用户下不再存在于新列表中的 `source = 'user'` 词条（系统词条不动）。
+    let existing_user: Vec<String> = {
+        let mut stmt =
+            tx.prepare("SELECT word FROM wordbook WHERE user_id = ?1 AND source = 'user'")?;
+        let rows = stmt.query_map(params![uid], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for old_w in existing_user {
+        if !seen.contains(&old_w) {
+            tx.execute(
+                "DELETE FROM wordbook WHERE user_id = ?1 AND word = ?2 AND source = 'user'",
+                params![uid, old_w],
+            )?;
+        }
+    }
+
+    // 插入新增词条或将同名 system 词条提升为 user（保留已有 hit_count/created_at）。
+    for w in &cleaned {
+        let updated = tx.execute(
+            "UPDATE wordbook SET source = 'user' WHERE user_id = ?1 AND word = ?2",
+            params![uid, w],
+        )?;
+        if updated == 0 {
+            tx.execute(
+                "INSERT INTO wordbook (user_id, word, source, created_at, hit_count)
+                 VALUES (?1, ?2, 'user', ?3, 0)",
+                params![uid, w, now],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM wordbook_candidates WHERE user_id = ?1 AND word = ?2",
+            params![uid, w],
+        )?;
+    }
+
+    tx.commit()?;
+    get_user_wordbook_in_conn(conn, uid)
+}
+
+/// USER-DIM：按频次顺序读取指定用户的全部词条（`user` + `system`，供识别热词与 LLM 注入）。
+pub fn load_user_words_ordered(user_id: &str) -> Result<Vec<String>> {
+    let conn = open_connection()?;
+    let uid = norm_uid(user_id);
+    let mut stmt = conn
+        .prepare("SELECT word FROM wordbook WHERE user_id = ?1 ORDER BY hit_count DESC, id DESC")?;
+    let words = stmt
+        .query_map(params![uid], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(words)
+}
+
+/// USER-DIM：记录指定用户在终稿中的词条命中，返回命中词列表。
+pub fn record_hits_for_user(user_id: &str, final_text: &str) -> Result<Vec<String>> {
+    if final_text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut conn = open_connection()?;
+    let uid = norm_uid(user_id);
+    let words: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT word FROM wordbook WHERE user_id = ?1 ORDER BY hit_count DESC, id DESC",
+        )?;
+        let iter = stmt.query_map(params![uid], |row| row.get::<_, String>(0))?;
+        iter.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let matched: Vec<String> = words
+        .into_iter()
+        .filter(|w| !w.is_empty() && final_text.contains(w.as_str()))
+        .collect();
+    if matched.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tx = conn.transaction()?;
+    for w in &matched {
+        tx.execute(
+            "UPDATE wordbook SET hit_count = hit_count + 1, last_used_at = datetime('now') \
+             WHERE user_id = ?1 AND word = ?2",
+            params![uid, w],
+        )?;
+    }
+    tx.commit()?;
+    Ok(matched)
+}
+
+/// USER-DIM：为指定用户插入正式词条（如自动学习晋升为 `system`）。
+pub fn insert_entry_for_user(user_id: &str, entry: &WordbookEntry) -> Result<bool> {
+    let conn = open_connection()?;
+    insert_entry_for_user_in_conn(&conn, norm_uid(user_id), entry)
+}
+
+pub fn insert_entry_for_user_in_conn(
+    conn: &Connection,
+    user_id: &str,
+    entry: &WordbookEntry,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "INSERT OR IGNORE INTO wordbook (user_id, word, source, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            norm_uid(user_id),
+            entry.word,
+            entry.source,
+            entry.created_at
+        ],
+    )?;
+    Ok(changed > 0)
+}
+
+pub fn word_exists_for_user(user_id: &str, word: &str) -> Result<bool> {
+    let conn = open_connection()?;
+    word_exists_for_user_in_conn(&conn, norm_uid(user_id), word)
+}
+
+pub fn word_exists_for_user_in_conn(conn: &Connection, user_id: &str, word: &str) -> Result<bool> {
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM wordbook WHERE user_id = ?1 AND word = ?2",
+        params![norm_uid(user_id), word],
+        |r| r.get(0),
+    )?;
+    Ok(exists > 0)
+}
+
+pub fn upsert_candidate_for_user(user_id: &str, word: &str) -> Result<u32> {
+    let conn = open_connection()?;
+    upsert_candidate_for_user_in_conn(&conn, norm_uid(user_id), word)
+}
+
+pub fn upsert_candidate_for_user_in_conn(
+    conn: &Connection,
+    user_id: &str,
+    word: &str,
+) -> Result<u32> {
+    let uid = norm_uid(user_id);
     conn.execute(
-        "INSERT INTO wordbook_candidates (word, count, last_seen)
-         VALUES (?1, 1, datetime('now'))
-         ON CONFLICT(word) DO UPDATE SET
+        "INSERT INTO wordbook_candidates (user_id, word, count, last_seen)
+         VALUES (?1, ?2, 1, datetime('now'))
+         ON CONFLICT(user_id, word) DO UPDATE SET
              count = wordbook_candidates.count + 1,
              last_seen = datetime('now')",
-        params![word],
+        params![uid, word],
     )?;
+    let count = conn
+        .query_row(
+            "SELECT count FROM wordbook_candidates WHERE user_id = ?1 AND word = ?2",
+            params![uid, word],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    Ok(count)
+}
 
-    get_candidate_count_in_conn(conn, word)
+pub fn delete_candidate_for_user(user_id: &str, word: &str) -> Result<bool> {
+    let conn = open_connection()?;
+    delete_candidate_for_user_in_conn(&conn, norm_uid(user_id), word)
+}
+
+pub fn delete_candidate_for_user_in_conn(
+    conn: &Connection,
+    user_id: &str,
+    word: &str,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "DELETE FROM wordbook_candidates WHERE user_id = ?1 AND word = ?2",
+        params![norm_uid(user_id), word],
+    )?;
+    Ok(changed > 0)
+}
+
+fn upsert_candidate_in_conn(conn: &Connection, word: &str) -> Result<u32> {
+    upsert_candidate_for_user_in_conn(conn, "local", word)
 }
 
 fn get_candidate_count_in_conn(conn: &Connection, word: &str) -> Result<u32> {
     let count = conn
         .query_row(
-            "SELECT count FROM wordbook_candidates WHERE word = ?1",
+            "SELECT count FROM wordbook_candidates WHERE user_id = 'local' AND word = ?1",
             params![word],
             |row| row.get(0),
         )
@@ -487,11 +824,7 @@ fn get_candidate_count_in_conn(conn: &Connection, word: &str) -> Result<u32> {
 }
 
 fn delete_candidate_in_conn(conn: &Connection, word: &str) -> Result<bool> {
-    let changed = conn.execute(
-        "DELETE FROM wordbook_candidates WHERE word = ?1",
-        params![word],
-    )?;
-    Ok(changed > 0)
+    delete_candidate_for_user_in_conn(conn, "local", word)
 }
 
 #[cfg(test)]
@@ -504,9 +837,11 @@ mod tests {
         conn.execute_batch(MIGRATION_001).expect("migration 001");
         conn.execute_batch(MIGRATION_002)
             .expect("candidate migration 002");
-        // Simulate the init flow: legacy import then migration 003 + finalize
+        // Simulate the init flow: legacy import then migration 003 + finalize + 004 + user_id
         conn.execute_batch(MIGRATION_003).expect("migration 003");
         finalize_singleword_migration(&conn).expect("finalize singleword migration");
+        ensure_hitcount_columns(&conn).expect("ensure hitcount columns");
+        ensure_user_id_schema(&conn).expect("ensure user_id schema");
         conn
     }
 
@@ -908,7 +1243,7 @@ mod tests {
     // WORDBOOK-SCHEMA-FIX-001: init_schema 三态条件化测试
     // ============================================================
 
-    /// 辅助：断言当前 schema 是 word 模式（有 word 列、无 raw 列、有 idx_wordbook_new_unique）
+    /// 辅助：断言当前 schema 是多用户 word 模式（有 word / user_id 列、无 raw 列、有 idx_wordbook_user_word）
     fn assert_word_schema(conn: &Connection) {
         let has_word: i64 = conn
             .query_row(
@@ -918,6 +1253,15 @@ mod tests {
             )
             .expect("check word column");
         assert_eq!(has_word, 1, "word column must exist");
+
+        let has_uid: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('wordbook') WHERE name = 'user_id'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("check user_id column");
+        assert_eq!(has_uid, 1, "user_id column must exist");
 
         let has_raw: i64 = conn
             .query_row(
@@ -930,22 +1274,22 @@ mod tests {
 
         let has_idx: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_wordbook_new_unique'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_wordbook_user_word'",
                 [],
                 |r| r.get(0),
             )
             .expect("check index");
-        assert_eq!(has_idx, 1, "idx_wordbook_new_unique must exist");
+        assert_eq!(has_idx, 1, "idx_wordbook_user_word must exist");
 
-        // 旧索引 idx_wordbook_unique 不应存在（防有人把旧索引又建回来）
+        // 旧索引 idx_wordbook_unique 与单用户 idx_wordbook_new_unique 均不应存在
         let has_old_idx: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_wordbook_unique'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('idx_wordbook_unique', 'idx_wordbook_new_unique')",
                 [],
                 |r| r.get(0),
             )
             .expect("check old index");
-        assert_eq!(has_old_idx, 0, "legacy idx_wordbook_unique must NOT exist");
+        assert_eq!(has_old_idx, 0, "legacy wordbook indexes must NOT exist");
     }
 
     /// 状态 C 幂等：建好 word 模式库 → 连续 init_schema 两次 → 均 Ok，且第二次无 schema 变化
@@ -1649,6 +1993,7 @@ mod tests {
         migrated.execute_batch(MIGRATION_003).expect("003");
         finalize_singleword_migration(&migrated).expect("finalize");
         ensure_hitcount_columns(&migrated).expect("ensure 004");
+        ensure_user_id_schema(&migrated).expect("ensure user_id");
         let migrated_info = table_info(&migrated);
 
         assert_eq!(
@@ -1734,5 +2079,50 @@ mod tests {
             1,
             "同一词条多次出现只 +1（实际行为，非 +N）"
         );
+    }
+
+    #[test]
+    fn user_wordbook_isolation_and_replace_keeps_system_words() {
+        let mut conn = Connection::open_in_memory().expect("open in memory db");
+        init_schema(&conn).expect("init_schema");
+
+        // 先模拟服务端为 "Gavin01" 自动产生了一条系统词条
+        insert_entry_for_user_in_conn(
+            &conn,
+            "Gavin01",
+            &WordbookEntry {
+                word: "系统词A".into(),
+                source: "system".into(),
+                created_at: "2026-11-12T00:00:00Z".into(),
+            },
+        )
+        .expect("insert system word for Gavin01");
+
+        // 调用 replace_user_words_in_conn(&mut conn, "Gavin01", &["用户词1".into(), "用户词2".into()])
+        let wb1 =
+            replace_user_words_in_conn(&mut conn, "Gavin01", &["用户词1".into(), "用户词2".into()])
+                .expect("replace user words first time");
+
+        // 验证返回的 UserWordbook 中 user_words 包含 "用户词1", "用户词2"，且 system_words 依然包含 "系统词A"（未丢失）
+        assert!(wb1.user_words.contains(&"用户词1".to_string()));
+        assert!(wb1.user_words.contains(&"用户词2".to_string()));
+        assert_eq!(wb1.system_words, vec!["系统词A".to_string()]);
+
+        // 再次调用 replace_user_words_in_conn(&mut conn, "Gavin01", &["用户词2".into(), "用户词3".into()])（全量替换去掉了 "用户词1"）
+        let wb2 =
+            replace_user_words_in_conn(&mut conn, "Gavin01", &["用户词2".into(), "用户词3".into()])
+                .expect("replace user words second time");
+
+        // 验证 "用户词1" 已被删除，"用户词2" 和 "用户词3" 在 user_words 中，且 "系统词A" 仍然完好保留在 system_words 中
+        assert!(!wb2.user_words.contains(&"用户词1".to_string()));
+        assert!(wb2.user_words.contains(&"用户词2".to_string()));
+        assert!(wb2.user_words.contains(&"用户词3".to_string()));
+        assert_eq!(wb2.system_words, vec!["系统词A".to_string()]);
+
+        // 同时验证另一用户 "Alice02" 的词库完全隔离（查询 "Alice02" 的词库为空）
+        let wb_alice = get_user_wordbook_in_conn(&conn, "Alice02").expect("get Alice02 wordbook");
+        assert!(wb_alice.user_words.is_empty());
+        assert!(wb_alice.system_words.is_empty());
+        assert!(wb_alice.entries.is_empty());
     }
 }

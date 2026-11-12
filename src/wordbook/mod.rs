@@ -204,6 +204,68 @@ impl Wordbook {
     }
 }
 
+/// USER-DIM：服务端按现有机制为指定用户自动观察并晋升系统词条（`source = 'system'`）。
+/// 复用 [`is_valid_candidate`] 与阈值策略；仅在达到 `threshold` 后写入该用户的 `wordbook` 表并返回新晋升词列表。
+pub fn learn_suggestions_for_user(
+    user_id: &str,
+    suggestions: &[String],
+    threshold: u32,
+) -> Result<Vec<String>> {
+    let uid = user_id.trim();
+    if uid.is_empty() || suggestions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let threshold = threshold.max(1);
+    let mut promoted = Vec::new();
+    for raw in suggestions {
+        let word = raw.trim();
+        if word.is_empty() {
+            continue;
+        }
+        if let Err(reason) = is_valid_candidate(word) {
+            log::debug!(
+                "Auto-learn candidate rejected for user '{}' ({}): {:?}",
+                uid,
+                reason,
+                word
+            );
+            continue;
+        }
+        if db::word_exists_for_user(uid, word)? {
+            let _ = db::delete_candidate_for_user(uid, word);
+            continue;
+        }
+        let count = db::upsert_candidate_for_user(uid, word)?;
+        if count < threshold {
+            log::warn!(
+                "[AUTOLEARN] user='{}' candidate observed: '{}' ({}/{})",
+                uid,
+                word,
+                count,
+                threshold
+            );
+            continue;
+        }
+        log::warn!(
+            "[AUTOLEARN] user='{}' promoted after threshold: '{}' ({}/{})",
+            uid,
+            word,
+            count,
+            threshold
+        );
+        let entry = WordbookEntry {
+            word: word.to_string(),
+            source: "system".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        if db::insert_entry_for_user(uid, &entry)? {
+            promoted.push(word.to_string());
+        }
+        let _ = db::delete_candidate_for_user(uid, word);
+    }
+    Ok(promoted)
+}
+
 /// AUTOLEARN-CANDIDATE-327：候选收窄规则（外置，根 `wordbook-rules.toml`）。
 #[derive(Debug, Clone, serde::Deserialize)]
 struct ExtractRules {

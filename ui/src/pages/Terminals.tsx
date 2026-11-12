@@ -16,6 +16,7 @@ interface Props {
 interface AddedTerminal {
   terminal_id: string;
   key: string;
+  pair_code: string;
   lan: string;
   wan: string;
   uri: string;
@@ -36,6 +37,7 @@ const TerminalsPage: React.FC<Props> = ({ t, ov, refresh }) => {
   const [notice, setNotice] = useState('');
   const [added, setAdded] = useState<AddedTerminal | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copiedPin, setCopiedPin] = useState(false);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionRow[]>([]);
@@ -89,6 +91,16 @@ const TerminalsPage: React.FC<Props> = ({ t, ov, refresh }) => {
     }
   };
 
+  const copyPin = async (pin: string) => {
+    try {
+      await navigator.clipboard.writeText(pin);
+      setCopiedPin(true);
+      setTimeout(() => setCopiedPin(false), 1500);
+    } catch (e) {
+      console.error('Copy pin failed:', e);
+    }
+  };
+
   const toggleDetail = async (row: TerminalRow) => {
     if (expanded === row.id) {
       setExpanded(null);
@@ -133,6 +145,11 @@ const TerminalsPage: React.FC<Props> = ({ t, ov, refresh }) => {
               <div style={{ display: 'flex', alignItems: 'center', gap: '12px', cursor: 'pointer' }} onClick={() => toggleDetail(row)}>
                 <strong style={{ fontSize: '15px' }}>{nameOf(row)}</strong>
                 {row.local && <span className="badge badge-neutral">{t.local_badge}</span>}
+                {row.user_id && (
+                  <span className="badge badge-neutral" data-testid={`term-user-${row.id}`}>
+                    {t.user_id_label}{t.colon}{row.user_id}
+                  </span>
+                )}
                 <span style={{ fontSize: '13px', color: row.online ? 'var(--status-success)' : 'var(--system-text-tertiary)' }}>
                   {row.online ? t.online : t.offline}
                 </span>
@@ -151,10 +168,14 @@ const TerminalsPage: React.FC<Props> = ({ t, ov, refresh }) => {
               </div>
               <div style={metaStyle}>
                 {row.local && !row.bound ? (
-                  <>{t.local_hint}{t.sep}{t.not_connected_yet}</>
+                  <>
+                    {t.user_id_label}{t.colon}{row.user_id || dash}
+                    {t.sep}{t.local_hint}{t.sep}{t.not_connected_yet}
+                  </>
                 ) : (
                   <>
-                    {t.voiceprint}{row.has_voiceprint ? t.vp_yes : t.vp_no}
+                    {t.user_id_label}{t.colon}{row.user_id || dash}
+                    {t.sep}{t.voiceprint}{row.has_voiceprint ? t.vp_yes : t.vp_no}
                     {t.sep}{t.last_login}{fmtTs(row.last_login_ts, dash)}
                     {t.sep}{t.last_logout}{fmtTs(row.last_logout_ts, dash)}
                     {t.sep}{t.week}{t.duration}{formatMinutes(row.week_speech_ms)}{t.minutes}
@@ -164,6 +185,10 @@ const TerminalsPage: React.FC<Props> = ({ t, ov, refresh }) => {
               </div>
               {expanded === row.id && (
                 <div style={{ fontSize: '13px', lineHeight: 1.8, margin: '6px 0 0 12px' }}>
+                  <div style={{ color: 'var(--system-text-secondary)' }}>
+                    {t.user_id_label}{t.colon}{row.user_id || dash}
+                    {t.sep}{t.device_id_label}{t.colon}{row.device_id || dash}
+                  </div>
                   <div>
                     {t.total}{t.duration}{formatMinutes(row.total_speech_ms)}{t.minutes}
                     {t.sep_inner}{t.words}{row.total_words}
@@ -201,6 +226,24 @@ const TerminalsPage: React.FC<Props> = ({ t, ov, refresh }) => {
                 <div style={{ display: 'flex', justifyContent: 'center' }} dangerouslySetInnerHTML={{ __html: added.qr_svg }} />
               )}
               <p style={{ ...hintStyle, textAlign: 'center', margin: '4px 0 12px' }}>{t.add_qr_hint}</p>
+              {added.pair_code && (
+                <div className="form-group">
+                  <label className="form-label">{t.pair_code_label}</label>
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    <input
+                      className="input"
+                      readOnly
+                      data-testid="term-add-pair-code"
+                      value={added.pair_code}
+                      style={{ fontFamily: 'monospace', fontSize: '18px', fontWeight: 700, letterSpacing: '4px', textAlign: 'center' }}
+                      onFocus={(e) => e.target.select()}
+                    />
+                    <button className="btn btn-secondary btn-sm" onClick={() => copyPin(added.pair_code)}>
+                      {copiedPin ? t.copied : t.copy}
+                    </button>
+                  </div>
+                </div>
+              )}
               <div className="form-group">
                 <label className="form-label">{t.conn_code}</label>
                 <div style={{ display: 'flex', gap: '8px' }}>
@@ -215,6 +258,7 @@ const TerminalsPage: React.FC<Props> = ({ t, ov, refresh }) => {
                 <div>{t.lan_label}{t.colon}{added.lan || dash}</div>
                 <div>{t.wan_label}{t.colon}{added.wan || dash}</div>
                 <div>{t.key}{t.colon}<strong>{added.key}</strong></div>
+                <div>{t.pair_code_label}{t.colon}<strong>{added.pair_code || dash}</strong></div>
                 <div>{t.fingerprint_label}{t.colon}{added.fingerprint ? formatFingerprint(added.fingerprint) : dash}</div>
               </div>
               <div className="modal-hint">

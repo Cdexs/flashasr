@@ -71,6 +71,10 @@ pub struct Status {
 #[serde(default)]
 pub struct TerminalRow {
     pub terminal_id: String,
+    /// 终端绑定的用户 ID（最长 12 位字母数字，字母开头；未绑定 ⇒ 空）。
+    pub user_id: String,
+    /// 终端绑定的设备码（最长 32 位；未绑定 ⇒ 空）。
+    pub device_id: String,
     /// 终端自报的名字（还没连过 ⇒ 空）。
     pub device_name: String,
     /// 已绑定设备（连过一次）。
@@ -83,7 +87,7 @@ pub struct TerminalRow {
     /// 最近一次接入方式：`lan` / `wan`。
     pub last_net: String,
     pub online: bool,
-    /// 服务端存有该终端的声纹。
+    /// 服务端存有该终端所属用户的声纹。
     pub has_voiceprint: bool,
 }
 
@@ -93,6 +97,8 @@ pub struct Added {
     pub terminal_id: String,
     /// key 明文（只在此刻出现一次）。
     pub key: String,
+    /// 6 位数字配对码明文（只在此刻与二维码/连接码一道出现一次；前端配对时必须一并校验）。
+    pub pair_code: String,
     /// 内网 `主机:端口`（取不到本机内网地址 ⇒ 空）。
     pub lan: String,
     /// 外网 `主机:端口`（没填 ⇒ 空）。

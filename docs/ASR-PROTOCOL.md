@@ -3,28 +3,30 @@
 > 给终端（飞音输入法、安卓 / iOS / 第三方程序）照着对接的契约。只描述线上能看到的行为，不依赖本仓库任何源码。
 > 本文与前台程序 `flashasr`（`src/front/`）逐条对应；两者不一致时以程序行为为准，并回来改本文。
 > 参考实现：`tools/asr-client/feiyin_asr_client.py`（Python，可直接跑通全流程，见 §9）。
-> 版本：v1（2026-10-17 一期；2026-10-29 flashasr 0.1.0 增补 §1.5、§4.1 场景、§5.2 终稿扩展、§5.4 `speech_ms` / `EngineRestarted`、§5.5 HTTP 接口，均向后兼容）。
+> 版本：v1（2026-10-17 一期；2026-10-29 增补 §1.5、§4.1 场景、§5.2 终稿扩展、§5.4 `speech_ms` / `EngineRestarted`、§5.5 HTTP 接口；2026-11-12 增补 6 位数字配对码校验、用户维度 `user_id` 跨终端共享词库/声纹、WebSocket 动作 `pair-terminal` / `get-wordbook` / `update-wordbook`，均向后兼容）。
 >
 > **完整接入文档见 `docs/API.md`**（含各语言示例）；本文与 API.md 不一致时**以 API.md 为准**。
 
 ## 0. 一句话
 
 **照阿里云百炼实时识别的 `run-task` WebSocket 协议发**（同名事件、同名字段），差别只有四处：
-① 地址、key、证书指纹来自**配对**（§1）；② 走 `wss://` 且**只认配对时的证书指纹**（§2）；
-③ `run-task` 里必须带本机身份 `parameters.feiyin.device_id / device_name`（§4.1）；
-④ 一期整段一句：`sentence_id` 恒为 1，`text` 每次给**至今全文**（§5.2）。
+① 地址、key、证书指纹及 **6 位数字配对码**来自**配对**（§1）；② 走 `wss://` 且**只认配对时的证书指纹**（§2）；
+③ 鉴权/识别必须带用户与本机身份 `feiyin.user_id / device_id / device_name`（首次远程配对必带 `feiyin.pair_code`）（§1.4 / §4.1）；
+④ 一期整段一句：`sentence_id` 恒为 1，`text` 每次给**至今全文**（§5.2）。并在同一条 WebSocket 上扩展了 `pair-terminal`、`get-wordbook`、`update-wordbook`（§4.5）。
 
 ---
 
-## 1. 配对：拿到地址、key、指纹
+## 1. 配对：拿到地址、key、6 位配对码、指纹
 
-服务端（运行 flashasr 的电脑）「添加终端」后给出三种等价形式：二维码、连接码（二维码的文字版）、分开显示的地址 + key。
+服务端（运行 flashasr 的电脑）「添加终端」后给出二维码、连接码（二维码的文字版）、分开显示的地址 + key + **6 位数字配对码（`pair_code`）**。
 
 ### 1.1 连接码 / 二维码内容
 
 ```
 flash-asr://pair?v=1&lan=192.168.1.5:7860&wan=asr.example.com:7860&key=ABCDEFGHIJKLMNOPQRSTUVWXYZ&fp=3f9a…（64 位十六进制）
 ```
+
+> **注意**：6 位数字配对码（`pair_code`）不拼入二维码与连接码 URI 中，而是独立展示在服务端管理界面弹窗中，由用户在客户端配对时手输校验（防止连接码文本意外泄露即导致终端被冒用）。
 
 | 字段 | 必有 | 说明 |
 | --- | --- | --- |
@@ -44,21 +46,22 @@ flash-asr://pair?v=1&lan=192.168.1.5:7860&wan=asr.example.com:7860&key=ABCDEFGHI
 - key 规整：**去掉所有空白和 `-`、转大写**后再用（服务端也按同样规则比对）。
 - 指纹为空 ⇒ 先只做 TLS 握手取回服务端证书指纹（不发 key），显示给用户核对（服务端设置页有同一串指纹），用户确认后才保存。**未经确认的指纹不得保存、不得带 key 连接。**
 
-### 1.3 key 的生命周期（终端需要知道的部分）
+### 1.3 key 与 6 位配对码的生命周期（终端需要知道的部分）
 
-- 新 key **10 分钟内**必须完成首次识别请求（§4.1），否则过期（`KeyExpired`）⇒ 让用户重新添加终端。服务端会定期清理过期的 key，**清理之后再用它报的是 `InvalidKey`**（不再是 `KeyExpired`），两者处理相同。
-- 首次识别请求时 key **绑定本机 `device_id`**；之后同一 key 只能由这台设备使用（换设备 ⇒ `DeviceMismatch`）。**本机终端（§1.5）例外：不绑设备**，同一台电脑上换 `device_id` 也照常可用。
-- 服务端可随时撤销（`KeyRevoked`），撤销时在线连接立即断开。
-- 以上三种错误终端都应提示「需要重新配对」，**不要自动重试**。
+- 新 key 与 **6 位数字配对码（`pair_code`）** 在 **10 分钟内**必须完成首次绑定（发 `pair-terminal`、`run-task`、`get-wordbook` 或 `update-wordbook`），否则过期（`KeyExpired`）⇒ 让用户重新添加终端。服务端会定期清理过期的 key，清理之后再用它报 `InvalidKey`。
+- 首次绑定时服务端同时校验 `key` + **6 位数字 `pair_code`**（错码或缺失 ⇒ `InvalidPairCode`）+ `user_id` + `device_id` + `device_name`。全部通过后，该终端永久绑定 `(user_id, device_id)`，之后日常重连**无需再传 `pair_code`**（若传了也须正确）。
+- 后续重连校验 `user_id` 与 `device_id` 不得变更（换用户 ⇒ `UserMismatch`，换设备 ⇒ `DeviceMismatch`）。**本机终端（§1.5）例外**：免 `pair_code` 校验且不绑死单台设备。
+- 服务端可随时撤销（`KeyRevoked`），撤销时在线连接立即断开。若同一 `user_id` 下还有其它未撤销终端，该用户的声纹与词库**保留不变**。
+- 以上认证错误终端都应提示「需要重新配对」，**不要自动重试**。
 
-### 1.4 本机身份
+### 1.4 用户与本机身份
 
 | 字段 | 规则 |
 | --- | --- |
-| `device_id` | 终端第一次配对时随机生成（建议 16 位字母数字），**之后永久不变**（重新配对也沿用），存本地 |
+| `user_id` | **1～12 位大小写字母 + 数字，且必须以字母开头**（`^[A-Za-z][A-Za-z0-9]{0,11}$`，区分大小写）。服务端将词库与声纹挂载在 `user_id` 下，同一用户在电脑、手机等多个终端连接共享同一份词库和声纹 |
+| `device_id` | 由前端根据设备 **CPU + 主板序列号**生成的唯一序列号，**1～32 位**非空白 ASCII 字符，存本地且固定不变 |
 | `device_name` | 给服务端用户看的名字（如「Gavin 的 iPhone」），可随时改；改了下次请求自动更新 |
-
-两者都不能为空（去首尾空白后）。
+| `pair_code` | 服务端生成的 **6 位数字配对码（`000000`～`999999`）**，首次绑定远程终端时必填 |
 
 ### 1.5 本机自动配对（终端与 flashasr 在同一台电脑）
 
@@ -143,7 +146,12 @@ Authorization: Bearer <key>
       "punctuation_prediction_enabled": true,
       "translation_enabled": false,
       "vocabulary": ["飞音", "LiveKit"],
-      "feiyin": { "device_id": "a1b2c3d4e5f6g7h8", "device_name": "Gavin 的 iPhone" }
+      "feiyin": {
+        "user_id": "Gavin01",
+        "device_id": "CPU9F8A7B6CMB123456",
+        "device_name": "Gavin 的 iPhone",
+        "pair_code": "482910"
+      }
     }
   }
 }
@@ -157,18 +165,22 @@ Authorization: Bearer <key>
 | `parameters.inverse_text_normalization_enabled` | | `true` | 数字规整（「三点五公斤」⇒「3.5公斤」） |
 | `parameters.punctuation_prediction_enabled` | | `true` | 补标点；`false` ⇒ 预览、终稿、译文**全部去标点** |
 | `parameters.translation_enabled` | | `false` | 终稿另给一份译文（§5.3）。方向按内容自动：含汉字 ⇒ 译成英文，否则译成中文；`translation_target_languages` 忽略。**翻译引擎跟输出优化开关**：开了输出优化 ⇒ 大模型一次完成「优化 + 翻译」（此时原文不再单独优化）；没开 ⇒ 服务端离线翻译模型 |
-| `parameters.vocabulary` | | 无 | 热词：字符串数组（推荐，按数组顺序取优先级），或百炼的 `{"词": 权重}` 对象（权重忽略）。**词库每个终端单独**：服务端只用这里给的词，不掺服务端本机词库 |
+| `parameters.vocabulary` | | 无 | 额外热词（字符串数组或 `{词: 权重}`）。识别时服务端会自动读取该 `user_id` 存储在服务端的词库（用户词条 + 系统词条，按命中频次排序），并与这里附加的词去重合并注入精解与大模型 |
+| `parameters.feiyin.user_id` | ✅ | — | §1.4，1～12 位字母开头+字母数字。不合规 ⇒ `InvalidUserId` 并断开；同一连接已鉴权后可省略 |
+| `parameters.feiyin.device_id` / `device_name` | ✅ | — | §1.4，最长 32 位硬件序列号与设备名。缺/超长 ⇒ `MissingDeviceInfo` 并断开；同一连接已鉴权后可省略 |
+| `parameters.feiyin.pair_code` | 首次 | — | 6 位数字配对码（首次绑定远程终端必填；已绑定或本机终端可省略）。错/缺失 ⇒ `InvalidPairCode` 并断开 |
 | `parameters.feiyin.output_optimization_enabled` | | `false` | 输出优化（大模型整理文字）。大模型用服务端统一配置；服务端没配 ⇒ 跳过此步、照常出结果 |
 | `parameters.feiyin.strip_trailing_punct` | | `false` | 去掉句末标点（句中标点保留） |
 | `parameters.feiyin.chinese_script` | | 服务端设置 | `"simplified"` / `"traditional"`；其它值 ⇒ 跟服务端设置 |
 | `parameters.feiyin.word_times` | | `true` | 终稿要不要精确逐字时间；`false` ⇒ 说完后最后一段不做强制对齐（终稿约快 0.25s，最后一段时间改估算，文字不变） |
 | `parameters.feiyin.scene` | | 未知场景 | 输入场景，供输出优化 / 大模型翻译调整写法：`{"kind": "chat", "style_hint": "", "multiline_safe": false}`。`kind` 取 `chat` / `agent` / `email` / `doc` / `ide_terminal` / `browser`，其它 ⇒ 未知；`style_hint` 自由文字风格提示（如「正式」）；`multiline_safe` = 目标输入框能否接受换行。窗口标题、程序名**不要传**（隐私） |
-| `parameters.feiyin.device_id` / `device_name` | ✅ | — | §1.4。缺 ⇒ `MissingDeviceInfo` 并断开 |
 | `header.streaming`、`payload.task_group / task / function / model / input` | | — | 服务端忽略，照百炼写即可（方便同一份代码对接百炼） |
 
 **固定内置、不可关**：同音字纠错、去口水词与口吃重复、无效文本判定（只有「嗯啊」之类 ⇒ 终稿为空）。
 
-**声纹**：服务端为每个终端单独累积使用人的声纹，攒够后自动剔除别人的声音（如旁边的人说话、视频声音）。终端被吊销时声纹一并删除；终端可主动重置（§5.5）。
+**声纹**：服务端将声纹挂载在 **`user_id`** 维度下（同一用户的电脑、手机终端共享），攒够后自动剔除别人的声音。可由用户主动重置（§5.5），或当该用户全部终端均被撤销时清理。
+
+**系统词库自动学习**：终稿输出优化产生的 `learn_suggestions` 会在服务端按现有候选校验与晋升阈值自动累积并写入该 `user_id` 的系统词库（`source="system"`），同时记录词频命中次数。
 
 成功 ⇒ 服务端回 `task-started`（§5.1），**之后**才能发音频。失败 ⇒ `task-failed`（§5.4）；**注意 `task-started` 只代表请求被受理，不代表识别通道已开好**：`ModelNotReady` / `ServiceBusy` 是在 `task-started` 之后才以 `task-failed` 告知的（识别中途还可能 `EngineRestarted`），终端收到 `task-started` 后仍须处理 `task-failed`。其中 `KeyRevoked` / `KeyExpired` / `InvalidKey` / `DeviceMismatch` / `MissingDeviceInfo` 之后服务端**断开连接**。
 
@@ -196,6 +208,20 @@ Authorization: Bearer <key>
 ### 4.4 取消
 
 一期没有取消消息：**直接关闭连接**即取消（服务端丢弃该段，不出终稿）。
+
+### 4.5 配对验证与用户词库同步动作（WebSocket 扩展）
+
+除 `run-task` / `finish-task` 外，同一条 WebSocket 连接还支持以下 3 个动作（`payload.feiyin` 在同一连接已鉴权后可省略）：
+
+1. **`pair-terminal`（配对立即验证 6 位数字配对码并绑定）**
+   - 请求：`{"header":{"action":"pair-terminal","task_id":"..."},"payload":{"feiyin":{"user_id":"Gavin01","device_id":"...","device_name":"...","pair_code":"482910"}}}`
+   - 成功响应事件 `terminal-paired`：`{"header":{"task_id":"...","event":"terminal-paired","attributes":{}},"payload":{"terminal_id":"...","user_id":"Gavin01","device_id":"...","device_name":"..."}}`
+2. **`update-wordbook`（全量更新当前用户的用户词条；不支持客户端更新系统词条）**
+   - 请求：`{"header":{"action":"update-wordbook","task_id":"..."},"payload":{"feiyin":{...},"user_words":["飞音","FlashASR"]}}`（若带 `system_words` 字段将被拒绝，报 `InvalidParameter`）
+   - 成功响应事件 `wordbook-updated`：`payload` 返回 `user_id`、`user_count`、`system_count`、`user_words`、`system_words`
+3. **`get-wordbook`（查询当前用户最新词库：含用户词条与系统词条）**
+   - 请求：`{"header":{"action":"get-wordbook","task_id":"..."},"payload":{"feiyin":{...}}}`
+   - 成功响应事件 `wordbook-result`：`payload` 返回 `user_id`、`user_count`、`system_count`、`user_words`、`system_words` 及完整 `entries`（含 `word`、`source`、`hit_count`、`created_at`、`last_used_at`）
 
 ---
 
@@ -285,7 +311,10 @@ Authorization: Bearer <key>
 | --- | --- | --- | --- |
 | `InvalidParameter` | JSON 坏、未知 `action`、缺 `task_id`、已有进行中的识别、`finish-task` 对不上 | 保持 | 程序错误，记日志 |
 | `UnsupportedFormat` | 非 pcm / 非 16000Hz | 保持 | 程序错误 |
-| `MissingDeviceInfo` | 缺 `device_id` / `device_name` | **断开** | 程序错误 |
+| `MissingDeviceInfo` | 缺 `device_id` / `device_name` 或 `device_id` 超 32 位 | **断开** | 程序错误 |
+| `InvalidPairCode` | 首次绑定未传 6 位数字配对码或配对码错误 | **断开** | 配对码错误，请核对后重试 |
+| `InvalidUserId` | `user_id` 缺失或不符合「字母开头、最长 12 位字母数字」 | **断开** | 用户 ID 格式不合法 |
+| `UserMismatch` | `user_id` 与该终端已绑定的用户不一致 | **断开** | 需要重新配对 |
 | `InvalidKey` / `KeyExpired` / `KeyRevoked` / `DeviceMismatch` | 见 §1.3 | **断开** | 需要重新配对 |
 | `ServicePaused` | 服务端暂停接入 | 保持 | 对方已暂停，稍后再试 |
 | `ServiceBusy` | 服务端推理通道已满 | 保持 | 对方正忙，稍后再试 |

@@ -27,10 +27,37 @@ use crate::{AccInput, PipelineEvent};
 /// 会话结束错误码（见 [`EndPayload::error`]）。
 pub(crate) const ERR_INTERNAL: &str = "internal";
 
+/// USER-DIM：将服务端按 `user_id` 存的用户+系统词库与请求附带 `vocabulary` 去重合并（服务端高频词在前）。
+fn merge_user_vocabulary(user_id: &str, req_vocab: &[String]) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    let uid = user_id.trim();
+    if !uid.is_empty() {
+        match crate::wordbook::db::load_user_words_ordered(uid) {
+            Ok(db_words) => {
+                for w in db_words {
+                    let w = w.trim();
+                    if !w.is_empty() && !words.iter().any(|x| x == w) {
+                        words.push(w.to_string());
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("[ASR-SERVER-491] load user '{uid}' wordbook failed: {e}");
+            }
+        }
+    }
+    for v in req_vocab {
+        let v = v.trim();
+        if !v.is_empty() && !words.iter().any(|w| w == v) {
+            words.push(v.to_string());
+        }
+    }
+    words
+}
+
 /// 终端词表（去重保序）⇒ 精解注入串。
 ///
-/// FLASH-P0-509（Gavin 10-29「词库也是每个前段单独的」）：词库属于各终端的使用人，**只用终端
-/// `vocabulary`**，不再掺服务端机主的本机词库（原先每路远程会话都注入机主词库）。
+/// USER-DIM：词库按 `user_id` 存储在服务端，并与请求附带 `vocabulary` 去重合并后注入精解。
 fn session_terms(vocabulary: &[String]) -> Option<String> {
     let mut words: Vec<String> = Vec::new();
     for v in vocabulary {
@@ -116,7 +143,8 @@ pub(crate) fn run_remote_session(
     // 预览打点：远程不另开一份标点模型（CT-Transformer 常驻实例由本机录音线程独占）⇒ 预览无标点；
     // 终稿用 1.7B 原生标点 / 精解线程的进程级标点服务，与本机一致。
     let acc_cfg = transcription::local_stream::AccDispatchConfig::new();
-    let acc_terms = session_terms(&params.vocabulary);
+    let effective_vocab = merge_user_vocabulary(&params.user_id, &params.vocabulary);
+    let acc_terms = session_terms(&effective_vocab);
     // S10：补标点跟终端参数（精解失败片的兜底打点也一样），不跟本机设置。
     let acc_punct_enabled = params.punctuation;
     let mut opts = TextOpts {
@@ -128,6 +156,7 @@ pub(crate) fn run_remote_session(
         scene: text_stage::scene_from_payload(params.scene.as_ref()),
         // FLASH-P0-513：开翻译时大模型一次做「优化 + 翻译」（见 `text_stage::translate`），原文不再单独过大模型。
         optimize: params.optimize && !params.translate,
+        vocabulary: effective_vocab.clone(),
     };
     // 预览线程「设备」标识：只用于近场门的音量沿用判据，远程已关门；带上设备代码便于日志区分。
     let vad_device = format!("remote:{}", params.device_id);
@@ -335,16 +364,38 @@ pub(crate) fn run_remote_session(
         None
     };
     let chars = text.chars().filter(|c| !c.is_whitespace()).count();
+    let hits = wordbook_hits(&effective_vocab, &text);
     emit(ResultPayload {
         is_final: true,
         text: text.clone(),
         tentative: 0,
         words: result_words(&text, &times, pcm_secs),
         translation,
-        wordbook_hits: wordbook_hits(&params.vocabulary, &text),
-        learn_suggestions: extras.learn_suggestions,
+        wordbook_hits: hits,
+        learn_suggestions: extras.learn_suggestions.clone(),
         optimization_skipped: extras.optimization_skipped.to_string(),
     });
+    // USER-DIM：终稿发出后在后台更新该用户的服务端词频计数，并由服务端按现有机制自动观察/晋升系统词条。
+    if !params.user_id.trim().is_empty() {
+        let uid = params.user_id.trim().to_string();
+        let final_text = text.clone();
+        let suggestions = extras.learn_suggestions;
+        let threshold = config.auto_learn_threshold;
+        std::thread::spawn(move || {
+            if !final_text.trim().is_empty() {
+                if let Err(e) = crate::wordbook::db::record_hits_for_user(&uid, &final_text) {
+                    log::warn!("[ASR-SERVER-491] record_hits_for_user({uid}) failed: {e}");
+                }
+            }
+            if !suggestions.is_empty() {
+                if let Err(e) =
+                    crate::wordbook::learn_suggestions_for_user(&uid, &suggestions, threshold)
+                {
+                    log::warn!("[ASR-SERVER-491] learn_suggestions_for_user({uid}) failed: {e}");
+                }
+            }
+        });
+    }
     // FLASH-P2-05：有效语音时长（独立一份 VAD，不碰进程级缓存）；VAD 不可用 ⇒ 整段长度。终稿已发出，不拖终稿。
     let speech_ms = transcription::effective_speech_ms_isolated(&pcm)
         .unwrap_or_else(|| (pcm.len() as u64) / 16);
@@ -606,8 +657,7 @@ mod tests {
         );
     }
 
-    /// FLASH-P0-509（源码 + 行为）：会话词表只来自终端 `vocabulary`，生产区不再打开服务端本机词库；
-    /// 去重保序、空白忽略。
+    /// USER-DIM（源码 + 行为）：合并该用户服务端词库与请求 `vocabulary`，去重保序、空白忽略。
     #[test]
     fn session_terms_only_terminal_vocabulary() {
         let src = include_str!("session.rs");
@@ -615,7 +665,7 @@ mod tests {
         let open = concat!("Wordbook::", "open");
         assert!(
             !prod.iter().any(|l| l.contains(open)),
-            "会话不得读服务端本机词库"
+            "会话不得直接打开本机单用户 Wordbook::open 缓存"
         );
         assert_eq!(session_terms(&[]), None);
         let v: Vec<String> = ["飞音", " ", "飞音", "LiveKit"]

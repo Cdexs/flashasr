@@ -155,6 +155,9 @@ pub(crate) fn pcm_i16le_to_f32(body: &[u8]) -> Vec<f32> {
 /// `Open` 帧参数。终端名称 / 设备代码由终端传来（§16.3），其余可缺省。
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct OpenParams {
+    /// 绑定的用户 ID（1~12 位字母开头 + 字母数字；声纹与词库均挂载在此用户维度下）。
+    #[serde(default)]
+    pub user_id: String,
     /// 终端设备代码（配对时绑定；统计按它归属）。
     #[serde(default)]
     pub device_id: String,
@@ -216,6 +219,7 @@ fn yes() -> bool {
 impl Default for OpenParams {
     fn default() -> Self {
         Self {
+            user_id: String::new(),
             device_id: String::new(),
             device_name: String::new(),
             terminal_id: String::new(),

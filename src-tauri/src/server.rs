@@ -11,7 +11,7 @@ use serde::Serialize;
 use crate::asr_shared::control::{self, Added, Request, Status, TerminalRow as CtlRow};
 use crate::asr_shared::pairing::{self, TerminalStore};
 use crate::asr_shared::settings::ServiceSettings;
-use crate::asr_shared::{self, purge_terminal_voiceprint, terminal_voiceprint_path};
+use crate::asr_shared::{self, purge_terminal_voiceprint};
 use crate::usage_stats as stats;
 
 const ERR_NOT_RUNNING: &str = "not_running";
@@ -21,6 +21,8 @@ const ERR_NOT_FOUND: &str = "not_found";
 #[derive(Serialize)]
 pub struct TerminalRow {
     pub id: String,
+    pub user_id: String,
+    pub device_id: String,
     pub device_name: String,
     pub local: bool,
     pub bound: bool,
@@ -85,6 +87,8 @@ fn terminal_rows(running: bool) -> Vec<CtlRow> {
             .filter(|t| !t.revoked)
             .map(|t| CtlRow {
                 terminal_id: t.id.clone(),
+                user_id: t.user_id.clone(),
+                device_id: t.device_id.clone(),
                 device_name: t.device_name.clone(),
                 bound: t.bound(),
                 local: t.local,
@@ -93,7 +97,8 @@ fn terminal_rows(running: bool) -> Vec<CtlRow> {
                 last_logout_ts: t.last_logout_ts,
                 last_net: t.last_net.clone(),
                 online: false,
-                has_voiceprint: terminal_voiceprint_path(&t.id).is_some_and(|p| p.exists()),
+                has_voiceprint: asr_shared::user_voiceprint_path(t.voiceprint_key(), &t.id)
+                    .is_some_and(|p| p.exists()),
             })
             .collect()
     });
@@ -119,6 +124,8 @@ pub fn server_overview() -> Result<Overview, String> {
                 total_speech_ms: u.map_or(0, |u| u.total.speech_ms),
                 total_words: u.map_or(0, |u| u.total.words),
                 id: t.terminal_id,
+                user_id: t.user_id,
+                device_id: t.device_id,
                 device_name: t.device_name,
                 local: t.local,
                 bound: t.bound,
@@ -331,17 +338,24 @@ pub fn server_revoke(terminal_id: String) -> Result<(), String> {
         // 前台没在运行：直接改文件（此时没有别的写者）。
         Err(_) => {
             let mut st = TerminalStore::load();
+            let vp_key = st
+                .get(&terminal_id)
+                .map(|t| t.voiceprint_key().to_string())
+                .unwrap_or_default();
             if !st.revoke(&terminal_id) {
                 return Err(ERR_NOT_FOUND.to_string());
             }
             st.save().map_err(|_| ERR_IO.to_string())?;
-            // 吊销 = 连该终端的声纹一起删。
-            purge_terminal_voiceprint(&terminal_id).map_err(|_| ERR_IO.to_string())
+            // 吊销：仅当该用户已无其它有效终端时删用户声纹。
+            if !vp_key.is_empty() && !st.any_active_with_vp_key(&vp_key, &terminal_id) {
+                purge_terminal_voiceprint(&vp_key).map_err(|_| ERR_IO.to_string())?;
+            }
+            Ok(())
         }
     }
 }
 
-/// 重置某终端的声纹（之后从零重新累积）。
+/// 重置某终端所属用户的声纹（之后从零重新累积）。
 #[tauri::command]
 pub fn server_reset_voiceprint(terminal_id: String) -> Result<(), String> {
     match control::call(&Request::ResetVoiceprint {
@@ -349,8 +363,16 @@ pub fn server_reset_voiceprint(terminal_id: String) -> Result<(), String> {
     }) {
         Ok(r) if r.error.is_empty() => Ok(()),
         Ok(_) => Err(ERR_NOT_FOUND.to_string()),
-        // 前台没在运行 ⇒ 引擎也不在：直接删档。
-        Err(_) => purge_terminal_voiceprint(&terminal_id).map_err(|_| ERR_IO.to_string()),
+        // 前台没在运行 ⇒ 引擎也不在：直接删该终端所属用户的声纹档。
+        Err(_) => {
+            let st = TerminalStore::load();
+            let vp_key = st
+                .get(&terminal_id)
+                .map(|t| t.voiceprint_key().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| terminal_id.clone());
+            purge_terminal_voiceprint(&vp_key).map_err(|_| ERR_IO.to_string())
+        }
     }
 }
 
