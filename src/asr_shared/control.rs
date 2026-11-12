@@ -144,6 +144,10 @@ impl GatewayInfo {
         let bytes = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
         super::write_atomic(&Self::path(), &bytes)
     }
+
+    pub fn remove() {
+        let _ = std::fs::remove_file(Self::path());
+    }
 }
 
 /// 读一行 JSON（超长 / 非法 ⇒ `InvalidData`）。

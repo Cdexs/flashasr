@@ -61,8 +61,10 @@ scan_paths() {
       reason="PoC / 本地临时测试（Gavin：PoC 代码与文件不入库）"
     elif case "$lbase" in voiceprint.bin|voiceprint.json) true ;; *) false ;; esac       || case "/$ldir/" in */voiceprints/*) true ;; *) false ;; esac; then
       reason="声纹存档（生物特征数据），只许本地留存"
-    elif case "$lbase" in asr-terminals.json|asr-remote.json|asr-gateway.json|asr-key.der|asr-cert.der) true ;; *) false ;; esac; then
-      reason="识别服务运行时数据（终端 key、配对信息、网关证书 / 私钥），只许本地留存"
+    elif case "$lbase" in asr-service.json|asr-terminals.json|asr-remote.json|asr-gateway.json|asr-key.der|asr-cert.der|.feiyin-client.json|local-pairing.json) true ;; *) false ;; esac; then
+      reason="识别服务运行时数据（终端 key、配对信息、网关证书 / 私钥、客户端设备标识），只许本地留存"
+    elif case "$lbase" in claude.md|agents.md|gemini.md|qwen.md) true ;; *) false ;; esac; then
+      reason="本地 Agent 指令文件，只许本地留存，不入公开仓库"
     elif case "$lbase" in *.pem|*.key|*.p12|*.pfx) true ;; *) false ;; esac; then
       reason="证书 / 私钥文件"
     fi

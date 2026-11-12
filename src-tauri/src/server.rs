@@ -163,12 +163,111 @@ pub fn server_overview() -> Result<Overview, String> {
     })
 }
 
-/// 启动 / 停止（总开关）。前台 1 秒内跟上。
+/// 启动 / 停止（总开关）。前台常驻时 1 秒内自重启跟上；若前台进程此前已退出，点「启动」时顺带拉起同目录 `flashasr`。
 #[tauri::command]
 pub fn server_set_enabled(enabled: bool) -> Result<(), String> {
     let mut s = ServiceSettings::load();
     s.enabled = enabled;
-    s.save().map_err(|_| ERR_IO.to_string())
+    s.save().map_err(|_| ERR_IO.to_string())?;
+    if enabled {
+        ensure_front_running();
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+const FRONT_EXE: &str = "flashasr.exe";
+#[cfg(not(target_os = "windows"))]
+const FRONT_EXE: &str = "flashasr";
+
+/// 检查 `<数据目录>/flashasr.lock` 是否已被前台实例持有；未被持有 ⇒ 拉起同目录的前台程序。
+/// 若已有实例在跑（例如处于 `enabled=false` 待机态），`try_lock` 会失败，交给它的 `watch_settings` 自重启即可；
+/// 即便极窄窗口内同时拉起，前台自身也有 `instance_lock` 单实例保护。
+fn front_lock_held(dir: &std::path::Path) -> bool {
+    let path = dir.join("flashasr.lock");
+    let Ok(f) = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+    else {
+        return false;
+    };
+    match f.try_lock() {
+        Ok(()) => {
+            // 能锁上 ⇒ 当前没有前台实例持有锁；`f` 作用域结束即自动释放。
+            false
+        }
+        Err(_) => true,
+    }
+}
+
+fn ensure_front_running() {
+    let dir = asr_shared::data_dir();
+    if front_lock_held(&dir) {
+        return;
+    }
+    let exe = dir.join(FRONT_EXE);
+    if !exe.is_file() {
+        return;
+    }
+    let _ = spawn_detached_front(&exe);
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_detached_front(exe: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        CreateProcessW, DETACHED_PROCESS, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW,
+    };
+
+    let app: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut cmdline: Vec<u16> = format!("\"{}\"", exe.display())
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let cwd: Option<Vec<u16>> = exe
+        .parent()
+        .map(|d| d.as_os_str().encode_wide().chain(Some(0)).collect());
+    let si = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    let mut pi = PROCESS_INFORMATION::default();
+    // SAFETY：缓冲区在调用期间有效，bInheritHandles = FALSE 保证前台不继承 UI / WebView2 的任何句柄。
+    unsafe {
+        CreateProcessW(
+            PCWSTR(app.as_ptr()),
+            PWSTR(cmdline.as_mut_ptr()),
+            None,
+            None,
+            false,
+            PROCESS_CREATION_FLAGS(DETACHED_PROCESS.0),
+            None,
+            cwd.as_ref().map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr())),
+            &si,
+            &mut pi,
+        )
+    }
+    .map_err(|e| std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF))?;
+    unsafe {
+        let _ = CloseHandle(pi.hThread);
+        let _ = CloseHandle(pi.hProcess);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn spawn_detached_front(exe: &std::path::Path) -> std::io::Result<()> {
+    use std::process::Stdio;
+    std::process::Command::new(exe)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
 }
 
 /// 保存外网地址（选填；端口 0 = 与本机端口相同）。
@@ -317,5 +416,42 @@ pub fn app_info() -> AppInfo {
     AppInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         data_dir: asr_shared::data_dir().display().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn front_lock_held_detects_active_lock_and_releases_probe() {
+        let dir = std::env::temp_dir().join(format!(
+            "flashasr_server_test_dir_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert!(!front_lock_held(&dir));
+        assert!(!front_lock_held(&dir));
+
+        let lock_path = dir.join("flashasr.lock");
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        f.try_lock().unwrap();
+
+        assert!(front_lock_held(&dir));
+
+        drop(f);
+        assert!(!front_lock_held(&dir));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

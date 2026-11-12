@@ -192,6 +192,7 @@ fn run() {
                 refresh(&tray, &pause, s);
             } else if ev.id == *exit.id() {
                 log::info!("[flashasr] 托盘「退出」");
+                crate::asr_shared::control::GatewayInfo::remove();
                 drop(tray);
                 std::process::exit(0);
             }
@@ -228,9 +229,69 @@ fn open_ui() {
     else {
         return;
     };
-    if let Err(e) = std::process::Command::new(&exe).spawn() {
+    if let Err(e) = spawn_detached_ui(&exe) {
         log::warn!("[flashasr] 打开管理界面失败（{}）：{e}", exe.display());
     }
+}
+
+/// 独立拉起管理界面，不继承本进程任何句柄（监听套接字、`flashasr.lock`、管道等）。
+/// Windows 上 `std::process::Command::spawn` 默认 `bInheritHandles = TRUE`，会让 `flashasr-ui`
+/// 及其 WebView2 子进程继承本进程的 7860 监听套接字与单实例锁 —— 之后点「停止」再点「启动」时，
+/// 旧实例虽已退出，管理界面仍握着旧套接字与旧锁，导致新实例抢锁超时或端口报 `os error 10048`。
+#[cfg(target_os = "windows")]
+fn spawn_detached_ui(exe: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        CreateProcessW, DETACHED_PROCESS, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW,
+    };
+
+    let app: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut cmdline: Vec<u16> = format!("\"{}\"", exe.display())
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let cwd: Option<Vec<u16>> = exe
+        .parent()
+        .map(|d| d.as_os_str().encode_wide().chain(Some(0)).collect());
+    let si = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    let mut pi = PROCESS_INFORMATION::default();
+    // SAFETY：缓冲区在调用期间有效，bInheritHandles = FALSE 阻断一切句柄继承；返回句柄立即关闭。
+    unsafe {
+        CreateProcessW(
+            PCWSTR(app.as_ptr()),
+            PWSTR(cmdline.as_mut_ptr()),
+            None,
+            None,
+            false,
+            PROCESS_CREATION_FLAGS(DETACHED_PROCESS.0),
+            None,
+            cwd.as_ref().map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr())),
+            &si,
+            &mut pi,
+        )
+    }
+    .map_err(|e| std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF))?;
+    unsafe {
+        let _ = CloseHandle(pi.hThread);
+        let _ = CloseHandle(pi.hProcess);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn spawn_detached_ui(exe: &std::path::Path) -> std::io::Result<()> {
+    use std::process::Stdio;
+    std::process::Command::new(exe)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
 }
 
 #[cfg(test)]

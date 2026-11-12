@@ -41,6 +41,49 @@ use asr_shared::settings::ServiceSettings;
 /// 同时在线连接上限（每路一个 TLS 会话 + 少量缓冲；推理通道上限由内核另管）。
 const MAX_CONNS: usize = 64;
 
+/// 清除文件句柄的可继承标志（Windows）：防止拉起子进程（引擎 / 自重启 / 管理界面）时把日志文件或
+/// `flashasr.lock` 句柄带过去，导致旧实例退出后锁仍被子进程占住。
+#[cfg(target_os = "windows")]
+fn mark_non_inheritable_file(file: &std::fs::File) {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{
+        SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT,
+    };
+    // SAFETY：`file` 持有有效内核句柄，清除 `HANDLE_FLAG_INHERIT` 不影响本进程读写与文件锁。
+    unsafe {
+        let _ = SetHandleInformation(
+            HANDLE(file.as_raw_handle() as _),
+            HANDLE_FLAG_INHERIT.0,
+            HANDLE_FLAGS(0),
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn mark_non_inheritable_file(_file: &std::fs::File) {}
+
+/// 清除套接字的可继承标志（Windows）：Winsock 套接字默认带 `HANDLE_FLAG_INHERIT`，而 `Command::spawn`
+/// 拉起引擎（需管道重定向 ⇒ `bInheritHandles = TRUE`）时会把所有可继承句柄复制进 `flashasr-engine`；
+/// 若前台自重启时引擎尚未完全退出，旧 7860 监听套接字仍被引擎持有，新实例绑定即报 `os error 10048`。
+#[cfg(target_os = "windows")]
+fn mark_non_inheritable_listener(listener: &TcpListener) {
+    use std::os::windows::io::AsRawSocket;
+    use windows::Win32::Foundation::{
+        SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT,
+    };
+    // SAFETY：`TcpListener` 底层 SOCKET 在 Win32 下是内核对象句柄，支持 `SetHandleInformation`。
+    unsafe {
+        let _ = SetHandleInformation(
+            HANDLE(listener.as_raw_socket() as _),
+            HANDLE_FLAG_INHERIT.0,
+            HANDLE_FLAGS(0),
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn mark_non_inheritable_listener(_listener: &TcpListener) {}
+
 /// 日志写到程序旁边的 `flashasr.log`；`-debug` ⇒ Debug 级。
 fn init_logging(debug: bool) {
     let level = if debug {
@@ -56,6 +99,7 @@ fn init_logging(debug: bool) {
         .append(true)
         .open(asr_shared::data_dir().join("flashasr.log"))
     {
+        mark_non_inheritable_file(&f);
         b.target(env_logger::Target::Pipe(Box::new(f)));
     }
     b.init();
@@ -98,6 +142,7 @@ fn instance_lock(wait: bool) -> Option<std::fs::File> {
             .write(true)
             .open(&path)
         {
+            mark_non_inheritable_file(&f);
             if f.try_lock().is_ok() {
                 return Some(f);
             }
@@ -140,16 +185,12 @@ fn watch_settings(start: (bool, u16)) {
                 start.1,
                 s.port
             );
-            let relaunch = std::env::current_exe().and_then(|exe| {
-                let mut cmd = std::process::Command::new(exe);
-                cmd.args(std::env::args().skip(1).filter(|a| a != RELAUNCH_ARG))
-                    .arg(RELAUNCH_ARG);
-                cmd.spawn()
-            });
+            let relaunch = std::env::current_exe().and_then(|exe| spawn_relaunch(&exe));
             if let Err(e) = relaunch {
                 log::error!("[flashasr] 自重启失败：{e}；保持当前状态");
                 continue;
             }
+            asr_shared::control::GatewayInfo::remove();
             #[cfg(target_os = "windows")]
             tray::shutdown();
             std::process::exit(0);
@@ -157,6 +198,66 @@ fn watch_settings(start: (bool, u16)) {
     if let Err(e) = spawn {
         log::warn!("[flashasr] 设置监视线程启动失败：{e}");
     }
+}
+
+/// 拉起自重启新实例（不继承当前实例任何句柄）。
+#[cfg(target_os = "windows")]
+fn spawn_relaunch(exe: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        CreateProcessW, DETACHED_PROCESS, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW,
+    };
+
+    let app: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut parts = vec![format!("\"{}\"", exe.display())];
+    for a in std::env::args().skip(1).filter(|a| a != RELAUNCH_ARG) {
+        parts.push(format!("\"{}\"", a.replace('"', "\\\"")));
+    }
+    parts.push(RELAUNCH_ARG.to_string());
+    let mut cmdline: Vec<u16> = parts.join(" ").encode_utf16().chain(Some(0)).collect();
+    let cwd: Option<Vec<u16>> = exe
+        .parent()
+        .map(|d| d.as_os_str().encode_wide().chain(Some(0)).collect());
+    let si = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    let mut pi = PROCESS_INFORMATION::default();
+    // SAFETY：缓冲区在调用期间有效，bInheritHandles = FALSE 保证新实例不继承旧套接字或文件锁。
+    unsafe {
+        CreateProcessW(
+            PCWSTR(app.as_ptr()),
+            PWSTR(cmdline.as_mut_ptr()),
+            None,
+            None,
+            false,
+            PROCESS_CREATION_FLAGS(DETACHED_PROCESS.0),
+            None,
+            cwd.as_ref().map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr())),
+            &si,
+            &mut pi,
+        )
+    }
+    .map_err(|e| std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF))?;
+    unsafe {
+        let _ = CloseHandle(pi.hThread);
+        let _ = CloseHandle(pi.hProcess);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn spawn_relaunch(exe: &std::path::Path) -> std::io::Result<()> {
+    use std::process::Stdio;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(std::env::args().skip(1).filter(|a| a != RELAUNCH_ARG))
+        .arg(RELAUNCH_ARG)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    cmd.spawn().map(|_| ())
 }
 
 /// 自重启时新实例带的参数（等旧实例释放单实例锁）。
@@ -182,20 +283,33 @@ fn main() {
     #[cfg(target_os = "windows")]
     tray::start();
     if !settings.enabled {
+        asr_shared::control::GatewayInfo::remove();
         log::info!("[flashasr] 总开关关着：不拉起引擎、不监听，等开关打开");
         loop {
             std::thread::park();
         }
     }
-    if let Err(e) = run(settings) {
-        log::error!("[flashasr] 启动失败：{e}");
-        std::process::exit(2);
+    if let Err(e) = run(settings, relaunch) {
+        asr_shared::control::GatewayInfo::remove();
+        log::error!("[flashasr] 启动失败：{e}；保持常驻等待设置变更或重试");
+        loop {
+            std::thread::park();
+        }
     }
 }
 
-fn run(settings: ServiceSettings) -> std::io::Result<()> {
+/// 绑定端口重试参数：自重启或快速「停止 → 启动」时，旧进程刚退出、内核释放监听端口可能需要短暂时间。
+const BIND_RETRY_ATTEMPTS: usize = 25;
+const BIND_RETRY_DELAY: Duration = Duration::from_millis(200);
+
+fn run(settings: ServiceSettings, retry_bind: bool) -> std::io::Result<()> {
     let (tls, fp) = tls::load_or_create()?;
     log::info!("[flashasr] 证书指纹 {fp}");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    // 先绑定端口，确认端口可用后再拉起引擎（避免端口冲突时白白拉起引擎又瞬间断开杀死它）。
+    let listeners = rt.block_on(bind_listeners(settings.port, retry_bind))?;
     let link = core_link::CoreLink::start()?;
     let shared = Arc::new(ws::Shared::new(link, settings.port, fp));
     shared.prune();
@@ -205,31 +319,56 @@ fn run(settings: ServiceSettings) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     let _ = tray::SHARED.set(shared.clone());
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(serve(shared, TlsAcceptor::from(tls), settings.port))
+    rt.block_on(serve(shared, TlsAcceptor::from(tls), listeners))
 }
 
 /// 监听 `[::]` 与 `0.0.0.0`。双栈系统（macOS / Linux 默认）上 `[::]` 已覆盖 IPv4，第二个绑定会失败——忽略即可；
 /// Windows 的 IPv6 套接字默认只收 IPv6，两个都绑得上。
-async fn serve(shared: Arc<ws::Shared>, acceptor: TlsAcceptor, port: u16) -> std::io::Result<()> {
-    let mut listeners = Vec::new();
-    for addr in [
-        SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)),
-        SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
-    ] {
-        match TcpListener::bind(addr).await {
-            Ok(l) => {
-                log::info!("[asr-gateway] 监听 {addr}");
-                listeners.push(l);
+async fn bind_listeners(port: u16, retry_on_busy: bool) -> std::io::Result<Vec<TcpListener>> {
+    let max_tries = if retry_on_busy {
+        BIND_RETRY_ATTEMPTS
+    } else {
+        5
+    };
+    for attempt in 1..=max_tries {
+        let mut listeners = Vec::new();
+        let mut any_addr_in_use = false;
+        for addr in [
+            SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)),
+            SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
+        ] {
+            match TcpListener::bind(addr).await {
+                Ok(l) => {
+                    mark_non_inheritable_listener(&l);
+                    log::info!("[asr-gateway] 监听 {addr}");
+                    listeners.push(l);
+                }
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::AddrInUse {
+                        any_addr_in_use = true;
+                    }
+                    if attempt == max_tries {
+                        log::info!("[asr-gateway] 未监听 {addr}：{e}");
+                    }
+                }
             }
-            Err(e) => log::info!("[asr-gateway] 未监听 {addr}：{e}"),
         }
+        if !listeners.is_empty() {
+            return Ok(listeners);
+        }
+        if !any_addr_in_use || attempt == max_tries {
+            break;
+        }
+        tokio::time::sleep(BIND_RETRY_DELAY).await;
     }
-    if listeners.is_empty() {
-        return Err(std::io::Error::other(format!("port {port} unavailable")));
-    }
+    Err(std::io::Error::other(format!("port {port} unavailable")))
+}
+
+async fn serve(
+    shared: Arc<ws::Shared>,
+    acceptor: TlsAcceptor,
+    listeners: Vec<TcpListener>,
+) -> std::io::Result<()> {
     let limit = Arc::new(Semaphore::new(MAX_CONNS));
     let mut tasks = Vec::new();
     for l in listeners {
@@ -260,4 +399,56 @@ async fn serve(shared: Arc<ws::Shared>, acceptor: TlsAcceptor, port: u16) -> std
         let _ = t.await;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bind_listeners_retries_when_port_briefly_busy() {
+        let v4_holder = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        let port = v4_holder.local_addr().unwrap().port();
+        let v6_holder = std::net::TcpListener::bind((Ipv6Addr::UNSPECIFIED, port)).ok();
+
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            drop(v4_holder);
+            drop(v6_holder);
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let res = rt.block_on(bind_listeners(port, true));
+        assert!(res.is_ok(), "bind_listeners 应重试成功: {:?}", res);
+        let listeners = res.unwrap();
+        assert!(!listeners.is_empty(), "listeners 不应为空");
+    }
+
+    #[test]
+    fn mark_non_inheritable_file_keeps_lock_working() {
+        let tmp_file_path = std::env::temp_dir().join(format!(
+            "flashasr_test_lock_{}_{}.tmp",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&tmp_file_path)
+            .unwrap();
+
+        mark_non_inheritable_file(&f);
+        assert!(f.try_lock().is_ok(), "mark_non_inheritable 后锁应依然可用");
+
+        drop(f);
+        let _ = std::fs::remove_file(&tmp_file_path);
+    }
 }
